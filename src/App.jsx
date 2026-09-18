@@ -579,6 +579,23 @@ export default function ControleFinanceiro() {
       });
   }, [vendas, despesas, compareMonths]);
 
+  // Histórico completo: todos os meses que já tiveram movimento, do primeiro ao mais recente.
+  const historicoCompleto = useMemo(() => {
+    const set = new Set();
+    [...vendas, ...despesas].forEach((e) => e.data && set.add(e.data.slice(0, 7)));
+    const meses = Array.from(set).sort(); // ordem cronológica
+    const linhas = meses.map((key) => {
+      const receita = vendas.filter((v) => v.data?.startsWith(key)).reduce((s, v) => s + Number(v.valor || 0), 0);
+      const despesa = despesas.filter((d) => d.data?.startsWith(key)).reduce((s, d) => s + Number(d.valor || 0), 0);
+      return { key, label: monthLabel(key), receita, despesa, saldo: receita - despesa };
+    });
+    const totalReceitaGeral = linhas.reduce((s, l) => s + l.receita, 0);
+    const totalDespesaGeral = linhas.reduce((s, l) => s + l.despesa, 0);
+    const melhorMes = linhas.length ? linhas.reduce((a, b) => (b.receita > a.receita ? b : a)) : null;
+    const piorMes = linhas.length ? linhas.reduce((a, b) => (b.receita < a.receita ? b : a)) : null;
+    return { linhas: linhas.slice().reverse(), totalReceitaGeral, totalDespesaGeral, saldoGeral: totalReceitaGeral - totalDespesaGeral, melhorMes, piorMes };
+  }, [vendas, despesas]);
+
   return (
     <div style={{ background: "var(--bg)", minHeight: "100%", padding: "0", fontFamily: "Inter, sans-serif" }}>
       <style>{`
@@ -706,6 +723,7 @@ export default function ControleFinanceiro() {
                 ["vendas", `Vendas (${vendasMes.length})`],
                 ["despesas", `Despesas (${despesasMes.length})`],
                 ["analises", "Análises"],
+                ["historico", "Histórico"],
               ].map(([key, label]) => (
                 <button
                   key={key}
@@ -723,7 +741,7 @@ export default function ControleFinanceiro() {
                 </button>
               ))}
               <div style={{ flex: 1 }} />
-              {tab !== "analises" && (
+              {tab !== "analises" && tab !== "historico" && (
                 <button
                   onClick={() => setModal({ type: tab === "despesas" ? "despesa" : "venda" })}
                   style={{
@@ -864,8 +882,95 @@ export default function ControleFinanceiro() {
               </div>
             )}
 
+            {/* Histórico completo */}
+            {tab === "historico" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <StatCard label="Total faturado (todos os meses)" value={formatBRL(historicoCompleto.totalReceitaGeral)} icon={TrendingUp} tone="up" />
+                  <StatCard label="Total de despesas (todos os meses)" value={formatBRL(historicoCompleto.totalDespesaGeral)} icon={TrendingDown} tone="down" />
+                  <StatCard label="Saldo acumulado" value={formatBRL(historicoCompleto.saldoGeral)} icon={Wallet} tone={historicoCompleto.saldoGeral >= 0 ? "up" : "down"} />
+                </div>
+
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <LedgerCard style={{ padding: "16px 18px", flex: 1, minWidth: 220, borderLeft: "3px solid var(--green)" }}>
+                    <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600, marginBottom: 6 }}>
+                      🏆 Melhor mês
+                    </div>
+                    {historicoCompleto.melhorMes ? (
+                      <>
+                        <div style={{ fontFamily: "Manrope, sans-serif", fontWeight: 800, fontSize: 20, color: "var(--ink)" }}>
+                          {historicoCompleto.melhorMes.label}
+                        </div>
+                        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, color: "var(--green)", fontWeight: 700, marginTop: 4 }}>
+                          {formatBRL(historicoCompleto.melhorMes.receita)} em receita
+                        </div>
+                      </>
+                    ) : (
+                      <div style={{ color: "var(--muted)", fontSize: 13 }}>Sem dados suficientes ainda.</div>
+                    )}
+                  </LedgerCard>
+
+                  <LedgerCard style={{ padding: "16px 18px", flex: 1, minWidth: 220, borderLeft: "3px solid var(--rust)" }}>
+                    <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600, marginBottom: 6 }}>
+                      Mês mais fraco
+                    </div>
+                    {historicoCompleto.piorMes ? (
+                      <>
+                        <div style={{ fontFamily: "Manrope, sans-serif", fontWeight: 800, fontSize: 20, color: "var(--ink)" }}>
+                          {historicoCompleto.piorMes.label}
+                        </div>
+                        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, color: "var(--rust)", fontWeight: 700, marginTop: 4 }}>
+                          {formatBRL(historicoCompleto.piorMes.receita)} em receita
+                        </div>
+                      </>
+                    ) : (
+                      <div style={{ color: "var(--muted)", fontSize: 13 }}>Sem dados suficientes ainda.</div>
+                    )}
+                  </LedgerCard>
+                </div>
+
+                <LedgerCard style={{ padding: "16px 18px" }}>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600, marginBottom: 10 }}>
+                    Todos os meses, do mais recente ao mais antigo
+                  </div>
+                  {historicoCompleto.linhas.length === 0 ? (
+                    <div style={{ padding: "20px 6px", textAlign: "center", color: "var(--muted)", fontFamily: "Inter, sans-serif", fontSize: 13.5 }}>
+                      Ainda não há lançamentos suficientes pra montar o histórico.
+                    </div>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Inter, sans-serif", fontSize: 12.5 }}>
+                        <thead>
+                          <tr style={{ borderBottom: "1px solid var(--paper-line)" }}>
+                            {["Mês", "Receita", "Despesa", "Saldo"].map((h) => (
+                              <th key={h} style={{ textAlign: h === "Mês" ? "left" : "right", padding: "6px 8px", color: "var(--muted)", fontWeight: 600, fontSize: 11 }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {historicoCompleto.linhas.map((row) => {
+                            const isBest = historicoCompleto.melhorMes && row.key === historicoCompleto.melhorMes.key;
+                            return (
+                              <tr key={row.key} style={{ borderBottom: "1px solid var(--paper-line)", background: isBest ? "rgba(75,101,82,0.08)" : "transparent" }}>
+                                <td style={{ padding: "7px 8px", fontFamily: "'JetBrains Mono', monospace" }}>
+                                  {row.label} {isBest ? "🏆" : ""}
+                                </td>
+                                <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace", color: "var(--green)" }}>{formatBRL(row.receita)}</td>
+                                <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace", color: "var(--rust)" }}>{formatBRL(row.despesa)}</td>
+                                <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: row.saldo >= 0 ? "var(--green)" : "var(--rust)" }}>{formatBRL(row.saldo)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </LedgerCard>
+              </div>
+            )}
+
             {/* List */}
-            {tab !== "analises" && (
+            {tab !== "analises" && tab !== "historico" && (
             <LedgerCard style={{ padding: "6px 14px 4px" }}>
               {tab !== "despesas" ? (
                 vendasMes.length === 0 ? (
