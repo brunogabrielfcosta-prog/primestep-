@@ -36,6 +36,31 @@ const CATALOGO_SERVICOS = [
 
 const CATEGORIAS_DESPESA = ["Produtos e insumos", "Aluguel", "Salários", "Marketing", "Impostos", "Equipamentos", "Outros"];
 
+const PLANOS_ASSINATURA = [
+  {
+    id: "basic",
+    nome: "Basic",
+    valor: 80,
+    tagline: "Cuide do essencial.",
+    itens: ["1 Cleaning Simple por mês", "1 Impermeabilização por mês", "Condições especiais em serviços adicionais"],
+  },
+  {
+    id: "prime",
+    nome: "Prime",
+    valor: 115,
+    tagline: "Eleve o cuidado.",
+    destaque: true,
+    itens: ["2 Cleaning Simple por mês", "1 Impermeabilização por mês", "Shoebag Prime de brinde", "Condições especiais em serviços adicionais"],
+  },
+  {
+    id: "black",
+    nome: "Black",
+    valor: 249.99,
+    tagline: "O cuidado completo.",
+    itens: ["3 Cleaning Simple por mês", "1 Restauração por mês", "Prioridade na agenda", "Retirada e entrega inclusas"],
+  },
+];
+
 const MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 
 function uid() {
@@ -60,10 +85,19 @@ function formatDateBR(d) {
 // ---------- Banco de dados (Supabase) ----------
 // Converte uma linha do banco de volta para o formato que o app usa.
 function rowToVenda(row) {
-  return { id: row.id, data: row.data, cliente: row.cliente, status: row.status, itens: row.itens || [], valor: Number(row.valor) };
+  return {
+    id: row.id, data: row.data, cliente: row.cliente, status: row.status, itens: row.itens || [], valor: Number(row.valor),
+    assinaturaId: row.assinatura_id || null, mesReferencia: row.mes_referencia || null,
+  };
 }
 function rowToDespesa(row) {
   return { id: row.id, data: row.data, descricao: row.descricao, categoria: row.categoria, valor: Number(row.valor) };
+}
+function rowToAssinatura(row) {
+  return {
+    id: row.id, cliente: row.cliente, planoId: row.plano_id, planoNome: row.plano_nome,
+    valorMensal: Number(row.valor_mensal), diaCobranca: row.dia_cobranca, dataInicio: row.data_inicio, status: row.status,
+  };
 }
 
 async function loadVendas() {
@@ -82,9 +116,18 @@ async function loadDespesas() {
   }
   return (data || []).map(rowToDespesa);
 }
+async function loadAssinaturas() {
+  const { data, error } = await supabase.from("assinaturas").select("*").order("cliente", { ascending: true });
+  if (error) {
+    console.error("Erro ao carregar assinaturas", error);
+    return [];
+  }
+  return (data || []).map(rowToAssinatura);
+}
 async function upsertVenda(v) {
   const { error } = await supabase.from("vendas").upsert({
     id: v.id, data: v.data, cliente: v.cliente, status: v.status, itens: v.itens, valor: v.valor,
+    assinatura_id: v.assinaturaId || null, mes_referencia: v.mesReferencia || null,
   });
   if (error) console.error("Erro ao salvar venda", error);
 }
@@ -101,6 +144,17 @@ async function upsertDespesa(d) {
 async function deleteDespesaRow(id) {
   const { error } = await supabase.from("despesas").delete().eq("id", id);
   if (error) console.error("Erro ao excluir despesa", error);
+}
+async function upsertAssinatura(a) {
+  const { error } = await supabase.from("assinaturas").upsert({
+    id: a.id, cliente: a.cliente, plano_id: a.planoId, plano_nome: a.planoNome,
+    valor_mensal: a.valorMensal, dia_cobranca: a.diaCobranca, data_inicio: a.dataInicio, status: a.status,
+  });
+  if (error) console.error("Erro ao salvar assinatura", error);
+}
+async function deleteAssinaturaRow(id) {
+  const { error } = await supabase.from("assinaturas").delete().eq("id", id);
+  if (error) console.error("Erro ao excluir assinatura", error);
 }
 
 // ---------- Small UI atoms ----------
@@ -159,7 +213,7 @@ const inputStyle = {
 
 // ---------- Modal form for Venda / Despesa ----------
 function novoItemServico() {
-  return { itemId: uid(), sel: CATALOGO_SERVICOS[0].nome, servico: CATALOGO_SERVICOS[0].nome, valor: String(CATALOGO_SERVICOS[0].valor) };
+  return { itemId: uid(), sel: CATALOGO_SERVICOS[0].nome, servico: CATALOGO_SERVICOS[0].nome, precoUnit: String(CATALOGO_SERVICOS[0].valor), quantidade: 1 };
 }
 
 function EntryModal({ type, initial, onSave, onClose }) {
@@ -175,12 +229,19 @@ function EntryModal({ type, initial, onSave, onClose }) {
     if (!source) return [novoItemServico()];
     return source.map((it) => {
       const match = CATALOGO_SERVICOS.find((s) => s.nome === it.servico);
-      return { itemId: uid(), sel: match ? match.nome : "custom", servico: it.servico, valor: String(it.valor) };
+      const qtd = it.quantidade || 1;
+      const precoUnit = qtd ? Number(it.valor) / qtd : it.valor;
+      return { itemId: uid(), sel: match ? match.nome : "custom", servico: it.servico, precoUnit: String(precoUnit), quantidade: qtd };
     });
   });
   const [error, setError] = useState("");
 
-  const total = itens.reduce((s, it) => s + (parseFloat(String(it.valor).replace(",", ".")) || 0), 0);
+  function itemSubtotal(it) {
+    const preco = parseFloat(String(it.precoUnit).replace(",", ".")) || 0;
+    const qtd = parseInt(it.quantidade, 10) || 0;
+    return preco * qtd;
+  }
+  const total = itens.reduce((s, it) => s + itemSubtotal(it), 0);
 
   function updateItem(itemId, patch) {
     setItens((prev) => prev.map((it) => (it.itemId === itemId ? { ...it, ...patch } : it)));
@@ -190,7 +251,7 @@ function EntryModal({ type, initial, onSave, onClose }) {
       updateItem(itemId, { sel: "custom", servico: "" });
     } else {
       const item = CATALOGO_SERVICOS.find((s) => s.nome === nomeSel);
-      updateItem(itemId, { sel: nomeSel, servico: item.nome, valor: String(item.valor) });
+      updateItem(itemId, { sel: nomeSel, servico: item.nome, precoUnit: String(item.valor) });
     }
   }
   function addItem() {
@@ -212,13 +273,16 @@ function EntryModal({ type, initial, onSave, onClose }) {
           setError("Informe o nome de todos os serviços adicionados.");
           return;
         }
-        const v = parseFloat(String(it.valor).replace(",", "."));
-        if (!v || v <= 0) {
-          setError("Informe um valor válido para cada serviço.");
+        if (itemSubtotal(it) <= 0) {
+          setError("Informe um valor e quantidade válidos para cada serviço.");
           return;
         }
       }
-      const itensClean = itens.map((it) => ({ servico: it.servico.trim(), valor: parseFloat(String(it.valor).replace(",", ".")) }));
+      const itensClean = itens.map((it) => ({
+        servico: it.servico.trim(),
+        quantidade: parseInt(it.quantidade, 10) || 1,
+        valor: itemSubtotal(it),
+      }));
       const totalClean = itensClean.reduce((s, it) => s + it.valor, 0);
       onSave({ id: initial?.id || uid(), data, cliente: nome.trim(), status, itens: itensClean, valor: totalClean });
     } else {
@@ -301,14 +365,51 @@ function EntryModal({ type, initial, onSave, onClose }) {
                             style={inputStyle}
                           />
                         )}
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          value={it.valor}
-                          onChange={(e) => updateItem(it.itemId, { valor: e.target.value })}
-                          placeholder="0,00"
-                          style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace", width: "50%" }}
-                        />
+                        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4, width: "42%" }}>
+                            <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>Valor unitário</span>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={it.precoUnit}
+                              onChange={(e) => updateItem(it.itemId, { precoUnit: e.target.value })}
+                              placeholder="0,00"
+                              style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }}
+                            />
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>Qtd.</span>
+                            <div style={{ display: "flex", alignItems: "center", border: "1px solid var(--paper-line)", borderRadius: 5, overflow: "hidden" }}>
+                              <button
+                                type="button"
+                                onClick={() => updateItem(it.itemId, { quantidade: Math.max(1, (parseInt(it.quantidade, 10) || 1) - 1) })}
+                                style={{ border: "none", background: "#FFFDF8", width: 28, height: 34, cursor: "pointer", color: "var(--ink)", fontWeight: 700 }}
+                              >
+                                −
+                              </button>
+                              <input
+                                type="number"
+                                min={1}
+                                value={it.quantidade}
+                                onChange={(e) => updateItem(it.itemId, { quantidade: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                                style={{ ...inputStyle, border: "none", borderLeft: "1px solid var(--paper-line)", borderRight: "1px solid var(--paper-line)", borderRadius: 0, width: 44, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" }}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => updateItem(it.itemId, { quantidade: (parseInt(it.quantidade, 10) || 1) + 1 })}
+                                style={{ border: "none", background: "#FFFDF8", width: 28, height: 34, cursor: "pointer", color: "var(--ink)", fontWeight: 700 }}
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                          <div style={{ flex: 1, textAlign: "right" }}>
+                            <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", display: "block" }}>Subtotal</span>
+                            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5, color: "var(--green)" }}>
+                              {formatBRL(itemSubtotal(it))}
+                            </span>
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -374,6 +475,125 @@ function EntryModal({ type, initial, onSave, onClose }) {
   );
 }
 
+// ---------- Modal de Assinatura ----------
+function AssinaturaModal({ initial, onSave, onClose }) {
+  const [cliente, setCliente] = useState(initial?.cliente || "");
+  const [planoId, setPlanoId] = useState(initial?.planoId || PLANOS_ASSINATURA[0].id);
+  const planoAtual = PLANOS_ASSINATURA.find((p) => p.id === planoId);
+  const [valorMensal, setValorMensal] = useState(initial?.valorMensal != null ? String(initial.valorMensal) : String(PLANOS_ASSINATURA[0].valor));
+  const [diaCobranca, setDiaCobranca] = useState(initial?.diaCobranca || 5);
+  const [dataInicio, setDataInicio] = useState(initial?.dataInicio || todayStr());
+  const [status, setStatus] = useState(initial?.status || "ativa");
+  const [error, setError] = useState("");
+
+  function handlePlanoChange(id) {
+    setPlanoId(id);
+    const p = PLANOS_ASSINATURA.find((pl) => pl.id === id);
+    if (p) setValorMensal(String(p.valor));
+  }
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!cliente.trim()) {
+      setError("Informe o nome do cliente.");
+      return;
+    }
+    const v = parseFloat(String(valorMensal).replace(",", "."));
+    if (!v || v <= 0) {
+      setError("Informe um valor mensal válido.");
+      return;
+    }
+    const dia = parseInt(diaCobranca, 10);
+    if (!dia || dia < 1 || dia > 28) {
+      setError("O dia de cobrança deve ser entre 1 e 28.");
+      return;
+    }
+    onSave({
+      id: initial?.id || uid(),
+      cliente: cliente.trim(),
+      planoId,
+      planoNome: planoAtual?.nome || "Personalizado",
+      valorMensal: v,
+      diaCobranca: dia,
+      dataInicio,
+      status,
+    });
+  }
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(23,20,15,0.55)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16,
+      }}
+      onClick={onClose}
+    >
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 440, maxHeight: "90vh", overflowY: "auto" }}>
+        <LedgerCard style={{ padding: 22 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>
+              {initial ? "Editar" : "Nova"} assinatura
+            </h3>
+            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
+              <X size={18} />
+            </button>
+          </div>
+          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <Field label="Cliente">
+              <input type="text" value={cliente} onChange={(e) => setCliente(e.target.value)} placeholder="Nome do cliente" style={inputStyle} />
+            </Field>
+
+            <Field label="Plano">
+              <select value={planoId} onChange={(e) => handlePlanoChange(e.target.value)} style={inputStyle}>
+                {PLANOS_ASSINATURA.map((p) => (
+                  <option key={p.id} value={p.id}>{p.nome} — {formatBRL(p.valor)}/mês</option>
+                ))}
+              </select>
+            </Field>
+            {planoAtual && (
+              <ul style={{ margin: "-4px 0 0", padding: "0 0 0 18px", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.6 }}>
+                {planoAtual.itens.map((it) => <li key={it}>{it}</li>)}
+              </ul>
+            )}
+
+            <Field label="Valor mensal (R$)">
+              <input type="text" inputMode="decimal" value={valorMensal} onChange={(e) => setValorMensal(e.target.value)} style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+            </Field>
+
+            <Field label="Dia de cobrança (todo mês)">
+              <input type="number" min={1} max={28} value={diaCobranca} onChange={(e) => setDiaCobranca(e.target.value)} style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+            </Field>
+
+            <Field label="Início da assinatura">
+              <input type="date" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} style={inputStyle} />
+            </Field>
+
+            <Field label="Status">
+              <select value={status} onChange={(e) => setStatus(e.target.value)} style={inputStyle}>
+                <option value="ativa">Ativa</option>
+                <option value="pausada">Pausada</option>
+                <option value="cancelada">Cancelada</option>
+              </select>
+            </Field>
+
+            {error && <div style={{ color: "var(--rust)", fontSize: 12.5, fontFamily: "Inter, sans-serif" }}>{error}</div>}
+            <button
+              type="submit"
+              style={{
+                marginTop: 6, padding: "11px 14px", borderRadius: 5, border: "none", cursor: "pointer",
+                background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif",
+                fontWeight: 600, fontSize: 13.5, letterSpacing: "0.02em",
+              }}
+            >
+              Salvar assinatura
+            </button>
+          </form>
+        </LedgerCard>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Ledger row list ----------
 function LedgerRow({ children, onEdit, onDelete }) {
   return (
@@ -405,17 +625,19 @@ function LedgerRow({ children, onEdit, onDelete }) {
 export default function ControleFinanceiro() {
   const [vendas, setVendas] = useState([]);
   const [despesas, setDespesas] = useState([]);
+  const [assinaturas, setAssinaturas] = useState([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
-  const [modal, setModal] = useState(null); // {type: 'venda'|'despesa', initial?}
+  const [modal, setModal] = useState(null); // {type: 'venda'|'despesa'|'assinatura', initial?}
   const now = new Date();
   const [monthFilter, setMonthFilter] = useState(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`);
 
   useEffect(() => {
     (async () => {
-      const [v, d] = await Promise.all([loadVendas(), loadDespesas()]);
+      const [v, d, a] = await Promise.all([loadVendas(), loadDespesas(), loadAssinaturas()]);
       setVendas(v);
       setDespesas(d);
+      setAssinaturas(a);
       setLoading(false);
     })();
   }, []);
@@ -431,11 +653,16 @@ export default function ControleFinanceiro() {
     if (changed?.type === "upsert") upsertDespesa(changed.item);
     if (changed?.type === "delete") deleteDespesaRow(changed.id);
   }, []);
+  const persistAssinaturas = useCallback((list, changed) => {
+    setAssinaturas(list);
+    if (changed?.type === "upsert") upsertAssinatura(changed.item);
+    if (changed?.type === "delete") deleteAssinaturaRow(changed.id);
+  }, []);
 
   const [importMsg, setImportMsg] = useState("");
 
   function handleExport() {
-    const payload = { app: "primestep-controle-financeiro", exportadoEm: new Date().toISOString(), vendas, despesas };
+    const payload = { app: "primestep-controle-financeiro", exportadoEm: new Date().toISOString(), vendas, despesas, assinaturas };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -456,18 +683,22 @@ export default function ControleFinanceiro() {
         const parsed = JSON.parse(reader.result);
         const v = Array.isArray(parsed.vendas) ? parsed.vendas : null;
         const d = Array.isArray(parsed.despesas) ? parsed.despesas : null;
+        const a = Array.isArray(parsed.assinaturas) ? parsed.assinaturas : [];
         if (!v || !d) throw new Error("formato inválido");
         const ok = window.confirm(
-          `Este backup tem ${v.length} venda(s) e ${d.length} despesa(s).\nIsso vai SUBSTITUIR os dados atuais (${vendas.length} venda(s), ${despesas.length} despesa(s)). Continuar?`
+          `Este backup tem ${v.length} venda(s), ${d.length} despesa(s) e ${a.length} assinatura(s).\nIsso vai SUBSTITUIR os dados atuais (${vendas.length} venda(s), ${despesas.length} despesa(s), ${assinaturas.length} assinatura(s)). Continuar?`
         );
         if (!ok) return;
         // Apaga tudo que existe hoje e grava o backup inteiro no banco.
         await Promise.all(vendas.map((old) => deleteVendaRow(old.id)));
         await Promise.all(despesas.map((old) => deleteDespesaRow(old.id)));
+        await Promise.all(assinaturas.map((old) => deleteAssinaturaRow(old.id)));
         await Promise.all(v.map((item) => upsertVenda(item)));
         await Promise.all(d.map((item) => upsertDespesa(item)));
+        await Promise.all(a.map((item) => upsertAssinatura(item)));
         setVendas(v);
         setDespesas(d);
+        setAssinaturas(a);
         setImportMsg("Backup restaurado com sucesso.");
         setTimeout(() => setImportMsg(""), 4000);
       } catch (err) {
@@ -483,9 +714,12 @@ export default function ControleFinanceiro() {
     if (modal.type === "venda") {
       const exists = vendas.some((v) => v.id === entry.id);
       persistVendas(exists ? vendas.map((v) => (v.id === entry.id ? entry : v)) : [entry, ...vendas], { type: "upsert", item: entry });
-    } else {
+    } else if (modal.type === "despesa") {
       const exists = despesas.some((d) => d.id === entry.id);
       persistDespesas(exists ? despesas.map((d) => (d.id === entry.id ? entry : d)) : [entry, ...despesas], { type: "upsert", item: entry });
+    } else if (modal.type === "assinatura") {
+      const exists = assinaturas.some((a) => a.id === entry.id);
+      persistAssinaturas(exists ? assinaturas.map((a) => (a.id === entry.id ? entry : a)) : [entry, ...assinaturas], { type: "upsert", item: entry });
     }
     setModal(null);
   }
@@ -495,6 +729,30 @@ export default function ControleFinanceiro() {
   }
   function deleteDespesa(id) {
     persistDespesas(despesas.filter((d) => d.id !== id), { type: "delete", id });
+  }
+  function deleteAssinatura(id) {
+    persistAssinaturas(assinaturas.filter((a) => a.id !== id), { type: "delete", id });
+  }
+
+  // Verifica se a cobrança de uma assinatura já foi registrada em determinado mês (YYYY-MM).
+  function cobrancaDoMes(assinaturaId, mesKey) {
+    return vendas.find((v) => v.assinaturaId === assinaturaId && v.mesReferencia === mesKey);
+  }
+
+  function handleRegistrarCobranca(sub) {
+    const mesKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    if (cobrancaDoMes(sub.id, mesKey)) return;
+    const entry = {
+      id: uid(),
+      data: todayStr(),
+      cliente: sub.cliente,
+      status: "pago",
+      itens: [{ servico: `Assinatura ${sub.planoNome}`, quantidade: 1, valor: sub.valorMensal }],
+      valor: sub.valorMensal,
+      assinaturaId: sub.id,
+      mesReferencia: mesKey,
+    };
+    persistVendas([entry, ...vendas], { type: "upsert", item: entry });
   }
 
   const vendasMes = useMemo(() => vendas.filter((v) => v.data?.startsWith(monthFilter)), [vendas, monthFilter]);
@@ -722,6 +980,7 @@ export default function ControleFinanceiro() {
               {[
                 ["vendas", `Vendas (${vendasMes.length})`],
                 ["despesas", `Despesas (${despesasMes.length})`],
+                ["assinaturas", `Assinaturas (${assinaturas.length})`],
                 ["analises", "Análises"],
                 ["historico", "Histórico"],
               ].map(([key, label]) => (
@@ -743,13 +1002,13 @@ export default function ControleFinanceiro() {
               <div style={{ flex: 1 }} />
               {tab !== "analises" && tab !== "historico" && (
                 <button
-                  onClick={() => setModal({ type: tab === "despesas" ? "despesa" : "venda" })}
+                  onClick={() => setModal({ type: tab === "despesas" ? "despesa" : tab === "assinaturas" ? "assinatura" : "venda" })}
                   style={{
                     display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 6, border: "none",
                     background: "var(--gold)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer",
                   }}
                 >
-                  <Plus size={15} /> Novo {tab === "despesas" ? "gasto" : "registro"}
+                  <Plus size={15} /> {tab === "assinaturas" ? "Nova assinatura" : `Novo ${tab === "despesas" ? "gasto" : "registro"}`}
                 </button>
               )}
             </div>
@@ -969,8 +1228,86 @@ export default function ControleFinanceiro() {
               </div>
             )}
 
+            {/* Assinaturas */}
+            {tab === "assinaturas" && (
+              <LedgerCard style={{ padding: "6px 14px 4px" }}>
+                {assinaturas.length === 0 ? (
+                  <div style={{ padding: "26px 6px", textAlign: "center", color: "var(--muted)", fontFamily: "Inter, sans-serif", fontSize: 13.5 }}>
+                    Nenhuma assinatura cadastrada ainda.
+                  </div>
+                ) : (
+                  assinaturas.map((sub) => {
+                    const mesKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+                    const cobranca = cobrancaDoMes(sub.id, mesKey);
+                    const diaHoje = now.getDate();
+                    const pendente = sub.status === "ativa" && !cobranca && diaHoje >= sub.diaCobranca;
+                    return (
+                      <div
+                        key={sub.id}
+                        style={{
+                          display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10,
+                          padding: "14px 6px", borderBottom: "1px solid var(--paper-line)",
+                        }}
+                      >
+                        <div style={{ flex: "1 1 220px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <strong style={{ fontFamily: "Inter, sans-serif", fontSize: 14, color: "var(--ink)" }}>{sub.cliente}</strong>
+                            <span
+                              style={{
+                                fontSize: 10.5, fontWeight: 700, padding: "2px 8px", borderRadius: 20, letterSpacing: "0.03em",
+                                background: sub.status === "ativa" ? "rgba(75,101,82,0.12)" : sub.status === "pausada" ? "rgba(138,131,117,0.15)" : "rgba(162,70,50,0.12)",
+                                color: sub.status === "ativa" ? "var(--green)" : sub.status === "pausada" ? "var(--muted)" : "var(--rust)",
+                                textTransform: "uppercase",
+                              }}
+                            >
+                              {sub.status}
+                            </span>
+                          </div>
+                          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                            Plano <strong style={{ color: "var(--ink)" }}>{sub.planoNome}</strong> · {formatBRL(sub.valorMensal)}/mês · cobra todo dia {sub.diaCobranca}
+                          </div>
+                          {pendente && (
+                            <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 5, fontSize: 11.5, fontWeight: 600, color: "var(--rust)" }}>
+                              <Clock size={12} /> Cobrança deste mês pendente
+                            </div>
+                          )}
+                          {cobranca && (
+                            <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 5, fontSize: 11.5, fontWeight: 600, color: "var(--green)" }}>
+                              <Check size={12} /> Cobrança de {monthLabel(mesKey)} registrada em {formatDateBR(cobranca.data)}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          {sub.status === "ativa" && (
+                            <button
+                              onClick={() => handleRegistrarCobranca(sub)}
+                              disabled={!!cobranca}
+                              title={cobranca ? "Cobrança deste mês já registrada" : "Registrar cobrança deste mês"}
+                              style={{
+                                padding: "7px 12px", borderRadius: 5, border: "none", cursor: cobranca ? "default" : "pointer",
+                                background: cobranca ? "var(--paper-line)" : "var(--ink)", color: cobranca ? "var(--muted)" : "var(--paper)",
+                                fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 12,
+                              }}
+                            >
+                              {cobranca ? "Cobrado este mês" : "Registrar cobrança"}
+                            </button>
+                          )}
+                          <button onClick={() => setModal({ type: "assinatura", initial: sub })} title="Editar" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
+                            <Pencil size={14} />
+                          </button>
+                          <button onClick={() => deleteAssinatura(sub.id)} title="Excluir" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 4 }}>
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </LedgerCard>
+            )}
+
             {/* List */}
-            {tab !== "analises" && tab !== "historico" && (
+            {tab !== "analises" && tab !== "historico" && tab !== "assinaturas" && (
             <LedgerCard style={{ padding: "6px 14px 4px" }}>
               {tab !== "despesas" ? (
                 vendasMes.length === 0 ? (
@@ -988,7 +1325,12 @@ export default function ControleFinanceiro() {
                           <strong>{v.cliente}</strong>
                           <span style={{ color: "var(--muted)" }}>
                             {" — "}
-                            {(v.itens?.length ? v.itens.map((i) => i.servico) : v.servico ? [v.servico] : []).join(", ")}
+                            {(v.itens?.length
+                              ? v.itens.map((i) => (i.quantidade > 1 ? `${i.servico} (x${i.quantidade})` : i.servico))
+                              : v.servico
+                              ? [v.servico]
+                              : []
+                            ).join(", ")}
                           </span>
                         </span>
                         <span
@@ -1031,7 +1373,14 @@ export default function ControleFinanceiro() {
         )}
       </div>
 
-      {modal && (
+      {modal && modal.type === "assinatura" && (
+        <AssinaturaModal
+          initial={modal.initial}
+          onSave={handleSaveEntry}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal && modal.type !== "assinatura" && (
         <EntryModal
           type={modal.type}
           initial={modal.initial}
