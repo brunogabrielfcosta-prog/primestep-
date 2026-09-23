@@ -1,664 +1,3 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
-import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, Wallet, Check, Clock, Download, Upload } from "lucide-react";
-import { createClient } from "@supabase/supabase-js";
-
-// Conexão com o banco de dados da Prime Step (Supabase).
-// A chave abaixo é a chave pública ("anon"), feita para ser usada no navegador.
-const SUPABASE_URL = "https://gwqbzquvjodwtzebbxra.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3cWJ6cXV2am9kd3R6ZWJieHJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxOTI4NDAsImV4cCI6MjEwMzc2ODg0MH0.6bUPgnOO0SxmW0ilhZK85KFO2vls5QkCxg-BLRt-vMs";
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');`;
-
-const CATALOGO_SERVICOS = [
-  {
-    nome: "Higienização Prime",
-    valor: 65,
-    descricao: "Limpeza profunda do cabedal, entressola e cadarços com produtos especializados e escovas próprias para cada material.",
-  },
-  {
-    nome: "Blindagem Protetora",
-    valor: 25,
-    descricao: "Impermeabilização que cria uma barreira contra água, poeira e manchas do uso diário.",
-  },
-  {
-    nome: "Restauração Prime",
-    valor: 120,
-    descricao: "Recuperação de solado amarelado, reparos no couro/camurça e retoques de pintura para devolver a aparência original.",
-  },
-  {
-    nome: "Taxa de Entrega",
-    valor: 15,
-    descricao: "Busca e/ou entrega do par na casa do cliente. Valor base — ajuste conforme a distância.",
-  },
-];
-
-const CATEGORIAS_DESPESA = ["Produtos e insumos", "Aluguel", "Salários", "Marketing", "Impostos", "Equipamentos", "Outros"];
-
-const PLANOS_ASSINATURA = [
-  {
-    id: "basic",
-    nome: "Basic",
-    valor: 80,
-    tagline: "Cuide do essencial.",
-    itens: ["1 Cleaning Simple por mês", "1 Impermeabilização por mês", "Condições especiais em serviços adicionais"],
-  },
-  {
-    id: "prime",
-    nome: "Prime",
-    valor: 115,
-    tagline: "Eleve o cuidado.",
-    destaque: true,
-    itens: ["2 Cleaning Simple por mês", "1 Impermeabilização por mês", "Shoebag Prime de brinde", "Condições especiais em serviços adicionais"],
-  },
-  {
-    id: "black",
-    nome: "Black",
-    valor: 249.99,
-    tagline: "O cuidado completo.",
-    itens: ["3 Cleaning Simple por mês", "1 Restauração por mês", "Prioridade na agenda", "Retirada e entrega inclusas"],
-  },
-];
-
-const MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
-
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-}
-
-function formatBRL(v) {
-  const n = Number(v) || 0;
-  return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-}
-
-function todayStr() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function formatDateBR(d) {
-  if (!d) return "";
-  const [y, m, day] = d.split("-");
-  return `${day}/${m}/${y}`;
-}
-
-// ---------- Banco de dados (Supabase) ----------
-// Converte uma linha do banco de volta para o formato que o app usa.
-function rowToVenda(row) {
-  return {
-    id: row.id, data: row.data, cliente: row.cliente, status: row.status, itens: row.itens || [], valor: Number(row.valor),
-    assinaturaId: row.assinatura_id || null, mesReferencia: row.mes_referencia || null,
-  };
-}
-function rowToDespesa(row) {
-  return { id: row.id, data: row.data, descricao: row.descricao, categoria: row.categoria, valor: Number(row.valor) };
-}
-function rowToAssinatura(row) {
-  return {
-    id: row.id, cliente: row.cliente, planoId: row.plano_id, planoNome: row.plano_nome,
-    valorMensal: Number(row.valor_mensal), diaCobranca: row.dia_cobranca, dataInicio: row.data_inicio, status: row.status,
-  };
-}
-
-async function loadVendas() {
-  const { data, error } = await supabase.from("vendas").select("*").order("data", { ascending: false });
-  if (error) {
-    console.error("Erro ao carregar vendas", error);
-    return [];
-  }
-  return (data || []).map(rowToVenda);
-}
-async function loadDespesas() {
-  const { data, error } = await supabase.from("despesas").select("*").order("data", { ascending: false });
-  if (error) {
-    console.error("Erro ao carregar despesas", error);
-    return [];
-  }
-  return (data || []).map(rowToDespesa);
-}
-async function loadAssinaturas() {
-  const { data, error } = await supabase.from("assinaturas").select("*").order("cliente", { ascending: true });
-  if (error) {
-    console.error("Erro ao carregar assinaturas", error);
-    return [];
-  }
-  return (data || []).map(rowToAssinatura);
-}
-async function upsertVenda(v) {
-  const { error } = await supabase.from("vendas").upsert({
-    id: v.id, data: v.data, cliente: v.cliente, status: v.status, itens: v.itens, valor: v.valor,
-    assinatura_id: v.assinaturaId || null, mes_referencia: v.mesReferencia || null,
-  });
-  if (error) console.error("Erro ao salvar venda", error);
-}
-async function deleteVendaRow(id) {
-  const { error } = await supabase.from("vendas").delete().eq("id", id);
-  if (error) console.error("Erro ao excluir venda", error);
-}
-async function upsertDespesa(d) {
-  const { error } = await supabase.from("despesas").upsert({
-    id: d.id, data: d.data, descricao: d.descricao, categoria: d.categoria, valor: d.valor,
-  });
-  if (error) console.error("Erro ao salvar despesa", error);
-}
-async function deleteDespesaRow(id) {
-  const { error } = await supabase.from("despesas").delete().eq("id", id);
-  if (error) console.error("Erro ao excluir despesa", error);
-}
-async function upsertAssinatura(a) {
-  const { error } = await supabase.from("assinaturas").upsert({
-    id: a.id, cliente: a.cliente, plano_id: a.planoId, plano_nome: a.planoNome,
-    valor_mensal: a.valorMensal, dia_cobranca: a.diaCobranca, data_inicio: a.dataInicio, status: a.status,
-  });
-  if (error) console.error("Erro ao salvar assinatura", error);
-}
-async function deleteAssinaturaRow(id) {
-  const { error } = await supabase.from("assinaturas").delete().eq("id", id);
-  if (error) console.error("Erro ao excluir assinatura", error);
-}
-
-// ---------- Small UI atoms ----------
-function LedgerCard({ children, style }) {
-  return (
-    <div
-      style={{
-        background: "var(--paper)",
-        border: "1px solid var(--paper-line)",
-        borderRadius: 4,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function StatCard({ label, value, icon, tone }) {
-  const toneColor = tone === "up" ? "var(--green)" : tone === "down" ? "var(--rust)" : "var(--ink)";
-  const Icon = icon;
-  return (
-    <LedgerCard style={{ padding: "18px 20px", flex: 1, minWidth: 180 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.09em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
-          {label}
-        </span>
-        <Icon size={16} color={toneColor} strokeWidth={2.25} />
-      </div>
-      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 24, fontWeight: 700, color: toneColor, letterSpacing: "-0.01em" }}>
-        {value}
-      </div>
-    </LedgerCard>
-  );
-}
-
-function Field({ label, children }) {
-  return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 5, fontFamily: "Inter, sans-serif" }}>
-      <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--muted)" }}>{label}</span>
-      {children}
-    </label>
-  );
-}
-
-const inputStyle = {
-  fontFamily: "Inter, sans-serif",
-  fontSize: 14,
-  padding: "9px 11px",
-  borderRadius: 5,
-  border: "1px solid var(--paper-line)",
-  background: "#FFFDF8",
-  color: "var(--ink)",
-  outline: "none",
-};
-
-// ---------- Modal form for Venda / Despesa ----------
-function novoItemServico() {
-  return { itemId: uid(), sel: CATALOGO_SERVICOS[0].nome, servico: CATALOGO_SERVICOS[0].nome, precoUnit: String(CATALOGO_SERVICOS[0].valor), quantidade: 1 };
-}
-
-function EntryModal({ type, initial, onSave, onClose }) {
-  const isVenda = type === "venda";
-  const [data, setData] = useState(initial?.data || todayStr());
-  const [nome, setNome] = useState(isVenda ? initial?.cliente || "" : initial?.descricao || "");
-  const [categoria, setCategoria] = useState(initial?.categoria || CATEGORIAS_DESPESA[0]);
-  const [status, setStatus] = useState(initial?.status || "pago");
-  const [valor, setValor] = useState(initial?.valor != null ? String(initial.valor) : "");
-  const [itens, setItens] = useState(() => {
-    if (!isVenda) return [];
-    const source = initial?.itens?.length ? initial.itens : initial?.servico ? [{ servico: initial.servico, valor: initial.valor }] : null;
-    if (!source) return [novoItemServico()];
-    return source.map((it) => {
-      const match = CATALOGO_SERVICOS.find((s) => s.nome === it.servico);
-      const qtd = it.quantidade || 1;
-      const precoUnit = qtd ? Number(it.valor) / qtd : it.valor;
-      return { itemId: uid(), sel: match ? match.nome : "custom", servico: it.servico, precoUnit: String(precoUnit), quantidade: qtd };
-    });
-  });
-  const [error, setError] = useState("");
-
-  function itemSubtotal(it) {
-    const preco = parseFloat(String(it.precoUnit).replace(",", ".")) || 0;
-    const qtd = parseInt(it.quantidade, 10) || 0;
-    return preco * qtd;
-  }
-  const total = itens.reduce((s, it) => s + itemSubtotal(it), 0);
-
-  function updateItem(itemId, patch) {
-    setItens((prev) => prev.map((it) => (it.itemId === itemId ? { ...it, ...patch } : it)));
-  }
-  function handleItemServicoChange(itemId, nomeSel) {
-    if (nomeSel === "custom") {
-      updateItem(itemId, { sel: "custom", servico: "" });
-    } else {
-      const item = CATALOGO_SERVICOS.find((s) => s.nome === nomeSel);
-      updateItem(itemId, { sel: nomeSel, servico: item.nome, precoUnit: String(item.valor) });
-    }
-  }
-  function addItem() {
-    setItens((prev) => [...prev, novoItemServico()]);
-  }
-  function removeItem(itemId) {
-    setItens((prev) => (prev.length > 1 ? prev.filter((it) => it.itemId !== itemId) : prev));
-  }
-
-  function handleSubmit(e) {
-    e.preventDefault();
-    if (!nome.trim()) {
-      setError(isVenda ? "Informe o cliente." : "Informe a descrição.");
-      return;
-    }
-    if (isVenda) {
-      for (const it of itens) {
-        if (it.sel === "custom" && !it.servico.trim()) {
-          setError("Informe o nome de todos os serviços adicionados.");
-          return;
-        }
-        if (itemSubtotal(it) <= 0) {
-          setError("Informe um valor e quantidade válidos para cada serviço.");
-          return;
-        }
-      }
-      const itensClean = itens.map((it) => ({
-        servico: it.servico.trim(),
-        quantidade: parseInt(it.quantidade, 10) || 1,
-        valor: itemSubtotal(it),
-      }));
-      const totalClean = itensClean.reduce((s, it) => s + it.valor, 0);
-      onSave({ id: initial?.id || uid(), data, cliente: nome.trim(), status, itens: itensClean, valor: totalClean });
-    } else {
-      const v = parseFloat(String(valor).replace(",", "."));
-      if (!v || v <= 0) {
-        setError("Informe um valor válido.");
-        return;
-      }
-      onSave({ id: initial?.id || uid(), data, valor: v, descricao: nome.trim(), categoria });
-    }
-  }
-
-  return (
-    <div
-      style={{
-        position: "fixed", inset: 0, background: "rgba(23,20,15,0.55)",
-        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16,
-      }}
-      onClick={onClose}
-    >
-      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 440, maxHeight: "90vh", overflowY: "auto" }}>
-        <LedgerCard style={{ padding: 22 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>
-              {initial ? "Editar" : "Novo"} {isVenda ? "registro de venda" : "registro de despesa"}
-            </h3>
-            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
-              <X size={18} />
-            </button>
-          </div>
-          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <Field label="Data">
-              <input type="date" value={data} onChange={(e) => setData(e.target.value)} style={inputStyle} />
-            </Field>
-            <Field label={isVenda ? "Cliente" : "Descrição"}>
-              <input
-                type="text"
-                value={nome}
-                onChange={(e) => setNome(e.target.value)}
-                placeholder={isVenda ? "Nome do cliente" : "Ex.: Conta de energia"}
-                style={inputStyle}
-              />
-            </Field>
-
-            {isVenda ? (
-              <>
-                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                  <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--muted)" }}>
-                    Serviços
-                  </span>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {itens.map((it, idx) => (
-                      <div key={it.itemId} style={{ border: "1px solid var(--paper-line)", borderRadius: 5, padding: 10, display: "flex", flexDirection: "column", gap: 8, position: "relative" }}>
-                        {itens.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => removeItem(it.itemId)}
-                            title="Remover serviço"
-                            style={{ position: "absolute", top: 6, right: 6, background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 3 }}
-                          >
-                            <X size={14} />
-                          </button>
-                        )}
-                        <select value={it.sel} onChange={(e) => handleItemServicoChange(it.itemId, e.target.value)} style={{ ...inputStyle, paddingRight: 26 }}>
-                          {CATALOGO_SERVICOS.map((s) => (
-                            <option key={s.nome} value={s.nome}>{s.nome} — {formatBRL(s.valor)}</option>
-                          ))}
-                          <option value="custom">Outro (personalizado)</option>
-                        </select>
-                        {it.sel !== "custom" ? (
-                          <span style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.4 }}>
-                            {CATALOGO_SERVICOS.find((s) => s.nome === it.sel)?.descricao}
-                          </span>
-                        ) : (
-                          <input
-                            type="text"
-                            value={it.servico}
-                            onChange={(e) => updateItem(it.itemId, { servico: e.target.value })}
-                            placeholder="Nome do serviço"
-                            style={inputStyle}
-                          />
-                        )}
-                        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 4, width: "42%" }}>
-                            <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>Valor unitário</span>
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              value={it.precoUnit}
-                              onChange={(e) => updateItem(it.itemId, { precoUnit: e.target.value })}
-                              placeholder="0,00"
-                              style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }}
-                            />
-                          </div>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>Qtd.</span>
-                            <div style={{ display: "flex", alignItems: "center", border: "1px solid var(--paper-line)", borderRadius: 5, overflow: "hidden" }}>
-                              <button
-                                type="button"
-                                onClick={() => updateItem(it.itemId, { quantidade: Math.max(1, (parseInt(it.quantidade, 10) || 1) - 1) })}
-                                style={{ border: "none", background: "#FFFDF8", width: 28, height: 34, cursor: "pointer", color: "var(--ink)", fontWeight: 700 }}
-                              >
-                                −
-                              </button>
-                              <input
-                                type="number"
-                                min={1}
-                                value={it.quantidade}
-                                onChange={(e) => updateItem(it.itemId, { quantidade: Math.max(1, parseInt(e.target.value, 10) || 1) })}
-                                style={{ ...inputStyle, border: "none", borderLeft: "1px solid var(--paper-line)", borderRight: "1px solid var(--paper-line)", borderRadius: 0, width: 44, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" }}
-                              />
-                              <button
-                                type="button"
-                                onClick={() => updateItem(it.itemId, { quantidade: (parseInt(it.quantidade, 10) || 1) + 1 })}
-                                style={{ border: "none", background: "#FFFDF8", width: 28, height: 34, cursor: "pointer", color: "var(--ink)", fontWeight: 700 }}
-                              >
-                                +
-                              </button>
-                            </div>
-                          </div>
-                          <div style={{ flex: 1, textAlign: "right" }}>
-                            <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", display: "block" }}>Subtotal</span>
-                            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5, color: "var(--green)" }}>
-                              {formatBRL(itemSubtotal(it))}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={addItem}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 5, alignSelf: "flex-start", marginTop: 2,
-                      background: "none", border: "1px dashed var(--paper-line)", borderRadius: 5, padding: "7px 10px",
-                      color: "var(--ink)", fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 12.5, cursor: "pointer",
-                    }}
-                  >
-                    <Plus size={13} /> Adicionar serviço
-                  </button>
-                </div>
-
-                <Field label="Status do pagamento">
-                  <select value={status} onChange={(e) => setStatus(e.target.value)} style={inputStyle}>
-                    <option value="pago">Pago</option>
-                    <option value="pendente">Pendente</option>
-                  </select>
-                </Field>
-
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 4, borderTop: "1px solid var(--paper-line)" }}>
-                  <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                    Total da venda
-                  </span>
-                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 18, color: "var(--green)" }}>
-                    {formatBRL(total)}
-                  </span>
-                </div>
-              </>
-            ) : (
-              <>
-                <Field label="Categoria">
-                  <select value={categoria} onChange={(e) => setCategoria(e.target.value)} style={inputStyle}>
-                    {CATEGORIAS_DESPESA.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="Valor (R$)">
-                  <input type="text" inputMode="decimal" value={valor} onChange={(e) => setValor(e.target.value)} placeholder="0,00" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
-                </Field>
-              </>
-            )}
-
-            {error && <div style={{ color: "var(--rust)", fontSize: 12.5, fontFamily: "Inter, sans-serif" }}>{error}</div>}
-            <button
-              type="submit"
-              style={{
-                marginTop: 6, padding: "11px 14px", borderRadius: 5, border: "none", cursor: "pointer",
-                background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif",
-                fontWeight: 600, fontSize: 13.5, letterSpacing: "0.02em",
-              }}
-            >
-              Salvar registro
-            </button>
-          </form>
-        </LedgerCard>
-      </div>
-    </div>
-  );
-}
-
-// ---------- Modal de Assinatura ----------
-function AssinaturaModal({ initial, onSave, onClose }) {
-  const [cliente, setCliente] = useState(initial?.cliente || "");
-  const [planoId, setPlanoId] = useState(initial?.planoId || PLANOS_ASSINATURA[0].id);
-  const planoAtual = PLANOS_ASSINATURA.find((p) => p.id === planoId);
-  const [valorMensal, setValorMensal] = useState(initial?.valorMensal != null ? String(initial.valorMensal) : String(PLANOS_ASSINATURA[0].valor));
-  const [diaCobranca, setDiaCobranca] = useState(initial?.diaCobranca || 5);
-  const [dataInicio, setDataInicio] = useState(initial?.dataInicio || todayStr());
-  const [status, setStatus] = useState(initial?.status || "ativa");
-  const [error, setError] = useState("");
-
-  function handlePlanoChange(id) {
-    setPlanoId(id);
-    const p = PLANOS_ASSINATURA.find((pl) => pl.id === id);
-    if (p) setValorMensal(String(p.valor));
-  }
-
-  function handleSubmit(e) {
-    e.preventDefault();
-    if (!cliente.trim()) {
-      setError("Informe o nome do cliente.");
-      return;
-    }
-    const v = parseFloat(String(valorMensal).replace(",", "."));
-    if (!v || v <= 0) {
-      setError("Informe um valor mensal válido.");
-      return;
-    }
-    const dia = parseInt(diaCobranca, 10);
-    if (!dia || dia < 1 || dia > 28) {
-      setError("O dia de cobrança deve ser entre 1 e 28.");
-      return;
-    }
-    onSave({
-      id: initial?.id || uid(),
-      cliente: cliente.trim(),
-      planoId,
-      planoNome: planoAtual?.nome || "Personalizado",
-      valorMensal: v,
-      diaCobranca: dia,
-      dataInicio,
-      status,
-    });
-  }
-
-  return (
-    <div
-      style={{
-        position: "fixed", inset: 0, background: "rgba(23,20,15,0.55)",
-        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16,
-      }}
-      onClick={onClose}
-    >
-      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 440, maxHeight: "90vh", overflowY: "auto" }}>
-        <LedgerCard style={{ padding: 22 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>
-              {initial ? "Editar" : "Nova"} assinatura
-            </h3>
-            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
-              <X size={18} />
-            </button>
-          </div>
-          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <Field label="Cliente">
-              <input type="text" value={cliente} onChange={(e) => setCliente(e.target.value)} placeholder="Nome do cliente" style={inputStyle} />
-            </Field>
-
-            <Field label="Plano">
-              <select value={planoId} onChange={(e) => handlePlanoChange(e.target.value)} style={inputStyle}>
-                {PLANOS_ASSINATURA.map((p) => (
-                  <option key={p.id} value={p.id}>{p.nome} — {formatBRL(p.valor)}/mês</option>
-                ))}
-              </select>
-            </Field>
-            {planoAtual && (
-              <ul style={{ margin: "-4px 0 0", padding: "0 0 0 18px", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.6 }}>
-                {planoAtual.itens.map((it) => <li key={it}>{it}</li>)}
-              </ul>
-            )}
-
-            <Field label="Valor mensal (R$)">
-              <input type="text" inputMode="decimal" value={valorMensal} onChange={(e) => setValorMensal(e.target.value)} style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
-            </Field>
-
-            <Field label="Dia de cobrança (todo mês)">
-              <input type="number" min={1} max={28} value={diaCobranca} onChange={(e) => setDiaCobranca(e.target.value)} style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
-            </Field>
-
-            <Field label="Início da assinatura">
-              <input type="date" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} style={inputStyle} />
-            </Field>
-
-            <Field label="Status">
-              <select value={status} onChange={(e) => setStatus(e.target.value)} style={inputStyle}>
-                <option value="ativa">Ativa</option>
-                <option value="pausada">Pausada</option>
-                <option value="cancelada">Cancelada</option>
-              </select>
-            </Field>
-
-            {error && <div style={{ color: "var(--rust)", fontSize: 12.5, fontFamily: "Inter, sans-serif" }}>{error}</div>}
-            <button
-              type="submit"
-              style={{
-                marginTop: 6, padding: "11px 14px", borderRadius: 5, border: "none", cursor: "pointer",
-                background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif",
-                fontWeight: 600, fontSize: 13.5, letterSpacing: "0.02em",
-              }}
-            >
-              Salvar assinatura
-            </button>
-          </form>
-        </LedgerCard>
-      </div>
-    </div>
-  );
-}
-
-// ---------- Ledger row list ----------
-function LedgerRow({ children, onEdit, onDelete }) {
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "90px 1fr 110px 90px",
-        gap: 10,
-        alignItems: "center",
-        padding: "12px 6px",
-        borderBottom: "1px solid var(--paper-line)",
-        fontFamily: "Inter, sans-serif",
-        fontSize: 13.5,
-      }}
-    >
-      {children}
-      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-        <button onClick={onEdit} title="Editar" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
-          <Pencil size={14} />
-        </button>
-        <button onClick={onDelete} title="Excluir" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 4 }}>
-          <Trash2 size={14} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-export default function ControleFinanceiro() {
-  const [vendas, setVendas] = useState([]);
-  const [despesas, setDespesas] = useState([]);
-  const [assinaturas, setAssinaturas] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState("dashboard");
-  const [modal, setModal] = useState(null); // {type: 'venda'|'despesa'|'assinatura', initial?}
-  const now = new Date();
-  const [monthFilter, setMonthFilter] = useState(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`);
-
-  useEffect(() => {
-    (async () => {
-      const [v, d, a] = await Promise.all([loadVendas(), loadDespesas(), loadAssinaturas()]);
-      setVendas(v);
-      setDespesas(d);
-      setAssinaturas(a);
-      setLoading(false);
-    })();
-  }, []);
-
-  // Atualiza a tela na hora (otimista) e salva no banco em seguida.
-  const persistVendas = useCallback((list, changed) => {
-    setVendas(list);
-    if (changed?.type === "upsert") upsertVenda(changed.item);
-    if (changed?.type === "delete") deleteVendaRow(changed.id);
-  }, []);
-  const persistDespesas = useCallback((list, changed) => {
-    setDespesas(list);
-    if (changed?.type === "upsert") upsertDespesa(changed.item);
-    if (changed?.type === "delete") deleteDespesaRow(changed.id);
-  }, []);
-  const persistAssinaturas = useCallback((list, changed) => {
-    setAssinaturas(list);
-    if (changed?.type === "upsert") upsertAssinatura(changed.item);
-    if (changed?.type === "delete") deleteAssinaturaRow(changed.id);
-  }, []);
-
   const [importMsg, setImportMsg] = useState("");
 
   function handleExport() {
@@ -720,6 +59,9 @@ export default function ControleFinanceiro() {
     } else if (modal.type === "assinatura") {
       const exists = assinaturas.some((a) => a.id === entry.id);
       persistAssinaturas(exists ? assinaturas.map((a) => (a.id === entry.id ? entry : a)) : [entry, ...assinaturas], { type: "upsert", item: entry });
+    } else if (modal.type === "pedido") {
+      const exists = pedidos.some((p) => p.id === entry.id);
+      persistPedidos(exists ? pedidos.map((p) => (p.id === entry.id ? entry : p)) : [entry, ...pedidos], { type: "upsert", item: entry });
     }
     setModal(null);
   }
@@ -732,6 +74,13 @@ export default function ControleFinanceiro() {
   }
   function deleteAssinatura(id) {
     persistAssinaturas(assinaturas.filter((a) => a.id !== id), { type: "delete", id });
+  }
+  function deletePedido(id) {
+    persistPedidos(pedidos.filter((p) => p.id !== id), { type: "delete", id });
+  }
+  function moverEtapaPedido(pedido, novaEtapaId) {
+    const atualizado = { ...pedido, etapa: novaEtapaId, dataEntrega: novaEtapaId === "entregue" ? todayStr() : null };
+    persistPedidos(pedidos.map((p) => (p.id === pedido.id ? atualizado : p)), { type: "upsert", item: atualizado });
   }
 
   // Verifica se a cobrança de uma assinatura já foi registrada em determinado mês (YYYY-MM).
@@ -978,6 +327,7 @@ export default function ControleFinanceiro() {
             {/* Tabs */}
             <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap" }}>
               {[
+                ["operacional", `Operacional (${pedidos.filter((p) => p.etapa !== "entregue").length})`],
                 ["vendas", `Vendas (${vendasMes.length})`],
                 ["despesas", `Despesas (${despesasMes.length})`],
                 ["assinaturas", `Assinaturas (${assinaturas.length})`],
@@ -988,12 +338,13 @@ export default function ControleFinanceiro() {
                   key={key}
                   onClick={() => setTab(key)}
                   style={{
-                    padding: "8px 16px", borderRadius: "6px 6px 0 0", border: "1px solid var(--paper-line)",
-                    borderBottom: tab === key ? "1px solid var(--paper)" : "1px solid var(--paper-line)",
+                    padding: "8px 16px", borderRadius: "6px 6px 0 0",
+                    border: key === "operacional" ? "1px solid var(--ink)" : "1px solid var(--paper-line)",
+                    borderBottom: tab === key ? "1px solid var(--paper)" : (key === "operacional" ? "1px solid var(--ink)" : "1px solid var(--paper-line)"),
                     background: tab === key ? "var(--paper)" : "transparent",
                     color: tab === key ? "var(--ink)" : "var(--muted)",
                     fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 13, cursor: "pointer",
-                    marginBottom: -1,
+                    marginBottom: -1, marginRight: key === "operacional" ? 8 : 0,
                   }}
                 >
                   {label}
@@ -1002,13 +353,13 @@ export default function ControleFinanceiro() {
               <div style={{ flex: 1 }} />
               {tab !== "analises" && tab !== "historico" && (
                 <button
-                  onClick={() => setModal({ type: tab === "despesas" ? "despesa" : tab === "assinaturas" ? "assinatura" : "venda" })}
+                  onClick={() => setModal({ type: tab === "despesas" ? "despesa" : tab === "assinaturas" ? "assinatura" : tab === "operacional" ? "pedido" : "venda" })}
                   style={{
                     display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 6, border: "none",
                     background: "var(--gold)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer",
                   }}
                 >
-                  <Plus size={15} /> {tab === "assinaturas" ? "Nova assinatura" : `Novo ${tab === "despesas" ? "gasto" : "registro"}`}
+                  <Plus size={15} /> {tab === "assinaturas" ? "Nova assinatura" : tab === "operacional" ? "Novo par" : `Novo ${tab === "despesas" ? "gasto" : "registro"}`}
                 </button>
               )}
             </div>
@@ -1228,6 +579,76 @@ export default function ControleFinanceiro() {
               </div>
             )}
 
+            {/* Operacional: fluxo do tênis do recebimento à entrega */}
+            {tab === "operacional" && (
+              <div style={{ display: "flex", gap: 12, overflowX: "auto", paddingBottom: 8 }}>
+                {ETAPAS_PEDIDO.map((et, idx) => {
+                  const itensEtapa = pedidos.filter((p) => p.etapa === et.id);
+                  return (
+                    <div key={et.id} style={{ minWidth: 220, flex: "0 0 220px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, padding: "0 2px" }}>
+                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: et.color, flexShrink: 0 }} />
+                        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--ink)" }}>
+                          {et.label}
+                        </span>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "var(--muted)" }}>({itensEtapa.length})</span>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {itensEtapa.length === 0 ? (
+                          <div style={{ border: "1px dashed var(--paper-line)", borderRadius: 5, padding: "16px 10px", textAlign: "center", color: "var(--muted)", fontSize: 11.5, fontFamily: "Inter, sans-serif" }}>
+                            Vazio
+                          </div>
+                        ) : (
+                          itensEtapa.map((p) => (
+                            <LedgerCard key={p.id} style={{ padding: 10, borderLeft: `3px solid ${et.color}` }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 4 }}>
+                                <strong style={{ fontFamily: "Inter, sans-serif", fontSize: 13, color: "var(--ink)" }}>{p.cliente}</strong>
+                                <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+                                  <button onClick={() => setModal({ type: "pedido", initial: p })} title="Editar" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 2 }}>
+                                    <Pencil size={12} />
+                                  </button>
+                                  <button onClick={() => deletePedido(p.id)} title="Excluir" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 2 }}>
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              </div>
+                              <div style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{p.tenis}</div>
+                              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "var(--muted)", marginTop: 4 }}>
+                                Entrada: {formatDateBR(p.dataEntrada)}
+                              </div>
+                              {p.observacoes && (
+                                <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, color: "var(--ink)", marginTop: 4, fontStyle: "italic" }}>
+                                  {p.observacoes}
+                                </div>
+                              )}
+                              <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
+                                {idx > 0 && (
+                                  <button
+                                    onClick={() => moverEtapaPedido(p, ETAPAS_PEDIDO[idx - 1].id)}
+                                    style={{ flex: 1, padding: "5px 4px", borderRadius: 4, border: "1px solid var(--paper-line)", background: "transparent", color: "var(--muted)", fontSize: 11, cursor: "pointer" }}
+                                  >
+                                    ← Voltar
+                                  </button>
+                                )}
+                                {idx < ETAPAS_PEDIDO.length - 1 && (
+                                  <button
+                                    onClick={() => moverEtapaPedido(p, ETAPAS_PEDIDO[idx + 1].id)}
+                                    style={{ flex: 1, padding: "5px 4px", borderRadius: 4, border: "none", background: "var(--ink)", color: "var(--paper)", fontSize: 11, fontWeight: 600, cursor: "pointer" }}
+                                  >
+                                    Avançar →
+                                  </button>
+                                )}
+                              </div>
+                            </LedgerCard>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             {/* Assinaturas */}
             {tab === "assinaturas" && (
               <LedgerCard style={{ padding: "6px 14px 4px" }}>
@@ -1307,7 +728,7 @@ export default function ControleFinanceiro() {
             )}
 
             {/* List */}
-            {tab !== "analises" && tab !== "historico" && tab !== "assinaturas" && (
+            {tab !== "analises" && tab !== "historico" && tab !== "assinaturas" && tab !== "operacional" && (
             <LedgerCard style={{ padding: "6px 14px 4px" }}>
               {tab !== "despesas" ? (
                 vendasMes.length === 0 ? (
@@ -1380,7 +801,14 @@ export default function ControleFinanceiro() {
           onClose={() => setModal(null)}
         />
       )}
-      {modal && modal.type !== "assinatura" && (
+      {modal && modal.type === "pedido" && (
+        <PedidoModal
+          initial={modal.initial}
+          onSave={handleSaveEntry}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal && modal.type !== "assinatura" && modal.type !== "pedido" && (
         <EntryModal
           type={modal.type}
           initial={modal.initial}
