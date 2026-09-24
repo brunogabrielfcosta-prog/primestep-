@@ -63,15 +63,16 @@ const PLANOS_ASSINATURA = [
 
 const MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 const DIAS_SEMANA = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+const DIAS_SEMANA_EXT = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
 
-// Etapas do fluxo operacional: do recebimento do tênis até a entrega ao cliente.
+// Etapas do fluxo operacional: do recebimento do tênis até a liberação para entrega.
 const ETAPAS_PEDIDO = [
-  { id: "recebido", label: "Recebido", color: "#8A8375" },
+  { id: "fotos_antes", label: "Fotos do antes", color: "#8A8375" },
   { id: "higienizacao", label: "Higienização", color: "#5B7A8C" },
   { id: "secagem", label: "Secagem", color: "#C7A96B" },
   { id: "acabamento", label: "Acabamento", color: "#A24632" },
-  { id: "pronto", label: "Pronto", color: "#4B6552" },
-  { id: "entregue", label: "Entregue", color: "#17140F" },
+  { id: "fotos_depois", label: "Fotos do depois", color: "#6B7A8F" },
+  { id: "liberado", label: "Liberado p/ entrega", color: "#4B6552" },
 ];
 
 function uid() {
@@ -656,7 +657,7 @@ function PedidoModal({ initial, onSave, onClose }) {
       dataEntrada,
       etapa,
       observacoes: observacoes.trim(),
-      dataEntrega: etapa === "entregue" ? (initial?.dataEntrega || todayStr()) : null,
+      dataEntrega: etapa === "liberado" ? (initial?.dataEntrega || todayStr()) : null,
     });
   }
 
@@ -717,6 +718,103 @@ function PedidoModal({ initial, onSave, onClose }) {
               Salvar pedido
             </button>
           </form>
+        </LedgerCard>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Modal de detalhe do dia (calendário) ----------
+function DayDetailModal({ iso, vendasDoDia, onEdit, onDelete, onAddNew, onClose }) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dow = new Date(y, m - 1, d).getDay();
+  const total = vendasDoDia.reduce((s, v) => s + Number(v.valor || 0), 0);
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(23,20,15,0.55)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16,
+      }}
+      onClick={onClose}
+    >
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 440, maxHeight: "85vh", overflowY: "auto" }}>
+        <LedgerCard style={{ padding: 22 }}>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 4 }}>
+            <div>
+              <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 17, fontWeight: 700, color: "var(--ink)" }}>
+                {DIAS_SEMANA_EXT[dow]}
+              </h3>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
+                {formatDateBR(iso)}
+              </div>
+            </div>
+            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
+              <X size={18} />
+            </button>
+          </div>
+
+          {vendasDoDia.length > 0 && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid var(--paper-line)", marginBottom: 8 }}>
+              <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>
+                {vendasDoDia.length} venda{vendasDoDia.length > 1 ? "s" : ""} nesse dia
+              </span>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: "var(--green)" }}>
+                {formatBRL(total)}
+              </span>
+            </div>
+          )}
+
+          {vendasDoDia.length === 0 ? (
+            <div style={{ padding: "20px 4px", textAlign: "center", color: "var(--muted)", fontFamily: "Inter, sans-serif", fontSize: 13.5 }}>
+              Nenhuma venda registrada nesse dia.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+              {vendasDoDia.map((v) => (
+                <div key={v.id} style={{ border: "1px solid var(--paper-line)", borderRadius: 6, padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <strong style={{ fontFamily: "Inter, sans-serif", fontSize: 13.5, color: "var(--ink)" }}>{v.cliente}</strong>
+                    <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                      {(v.itens?.length
+                        ? v.itens.map((i) => (i.quantidade > 1 ? `${i.servico} (x${i.quantidade})` : i.servico))
+                        : v.servico
+                        ? [v.servico]
+                        : []
+                      ).join(", ")}
+                    </div>
+                    <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 5, fontSize: 11, fontWeight: 600, color: v.status === "pago" ? "var(--green)" : "var(--rust)" }}>
+                      {v.status === "pago" ? <Check size={11} /> : <Clock size={11} />}
+                      {v.status === "pago" ? "Pago" : "Pendente"}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 13.5, color: "var(--green)" }}>{formatBRL(v.valor)}</span>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button onClick={() => onEdit(v)} title="Editar" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 2 }}>
+                        <Pencil size={13} />
+                      </button>
+                      <button onClick={() => onDelete(v.id)} title="Excluir" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 2 }}>
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <button
+            onClick={onAddNew}
+            style={{
+              marginTop: 16, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              padding: "11px 14px", borderRadius: 5, border: "none", cursor: "pointer",
+              background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif",
+              fontWeight: 600, fontSize: 13.5, letterSpacing: "0.02em",
+            }}
+          >
+            <Plus size={15} /> Registrar venda nesse dia
+          </button>
         </LedgerCard>
       </div>
     </div>
@@ -876,7 +974,7 @@ export default function ControleFinanceiro() {
     persistPedidos(pedidos.filter((p) => p.id !== id), { type: "delete", id });
   }
   function moverEtapaPedido(pedido, novaEtapaId) {
-    const atualizado = { ...pedido, etapa: novaEtapaId, dataEntrega: novaEtapaId === "entregue" ? todayStr() : null };
+    const atualizado = { ...pedido, etapa: novaEtapaId, dataEntrega: novaEtapaId === "liberado" ? todayStr() : null };
     persistPedidos(pedidos.map((p) => (p.id === pedido.id ? atualizado : p)), { type: "upsert", item: atualizado });
   }
 
@@ -939,6 +1037,7 @@ export default function ControleFinanceiro() {
     return [];
   }
 
+  const [selectedDia, setSelectedDia] = useState(null);
   const [pieScope, setPieScope] = useState("mes"); // 'mes' | 'todos'
   const [compareMonths, setCompareMonths] = useState([]);
 
@@ -1166,7 +1265,7 @@ export default function ControleFinanceiro() {
             {/* Tabs */}
             <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap" }}>
               {[
-                ["operacional", `Operacional (${pedidos.filter((p) => p.etapa !== "entregue").length})`],
+                ["operacional", `Operacional (${pedidos.filter((p) => p.etapa !== "liberado").length})`],
                 ["vendas", `Vendas (${vendasMes.length})`],
                 ["despesas", `Despesas (${despesasMes.length})`],
                 ["assinaturas", `Assinaturas (${assinaturas.length})`],
@@ -1366,12 +1465,14 @@ export default function ControleFinanceiro() {
                           return (
                             <div
                               key={ci}
-                              title={cel.total > 0 ? `${formatDateBR(cel.iso)}: ${formatBRL(cel.total)} (${cel.qtd} venda${cel.qtd > 1 ? "s" : ""})` : formatDateBR(cel.iso)}
+                              onClick={() => setSelectedDia(cel.iso)}
+                              title={cel.total > 0 ? `${formatDateBR(cel.iso)}: ${formatBRL(cel.total)} (${cel.qtd} venda${cel.qtd > 1 ? "s" : ""}) — toque para ver` : `${formatDateBR(cel.iso)} — toque para registrar`}
                               style={{
-                                aspectRatio: "1", borderRadius: 5, padding: "4px 3px",
+                                aspectRatio: "1", borderRadius: 5, padding: "4px 3px", cursor: "pointer",
                                 background: cel.total > 0 ? `rgba(75,101,82,${intensidade})` : "#FFFDF8",
                                 border: "1px solid var(--paper-line)",
                                 display: "flex", flexDirection: "column", justifyContent: "space-between",
+                                transition: "transform 0.1s",
                               }}
                             >
                               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "var(--muted)" }}>{cel.dia}</span>
@@ -1730,6 +1831,23 @@ export default function ControleFinanceiro() {
           initial={modal.initial}
           onSave={handleSaveEntry}
           onClose={() => setModal(null)}
+        />
+      )}
+      {selectedDia && (
+        <DayDetailModal
+          iso={selectedDia}
+          vendasDoDia={vendas.filter((v) => v.data === selectedDia)}
+          onClose={() => setSelectedDia(null)}
+          onEdit={(v) => {
+            setSelectedDia(null);
+            setModal({ type: "venda", initial: v });
+          }}
+          onDelete={(id) => deleteVenda(id)}
+          onAddNew={() => {
+            const iso = selectedDia;
+            setSelectedDia(null);
+            setModal({ type: "venda", initial: { data: iso } });
+          }}
         />
       )}
       {modal && modal.type === "pedido" && (
