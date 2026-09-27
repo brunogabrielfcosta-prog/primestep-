@@ -2,12 +2,13 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
 import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, Wallet, Check, Clock, Download, Upload, Calendar } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
+import ControlePessoal from "./ControlePessoal.jsx";
 
 // Conexão com o banco de dados da Prime Step (Supabase).
 // A chave abaixo é a chave pública ("anon"), feita para ser usada no navegador.
 const SUPABASE_URL = "https://gwqbzquvjodwtzebbxra.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3cWJ6cXV2am9kd3R6ZWJieHJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxOTI4NDAsImV4cCI6MjEwMzc2ODg0MH0.6bUPgnOO0SxmW0ilhZK85KFO2vls5QkCxg-BLRt-vMs";
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');`;
 
@@ -849,7 +850,7 @@ function LedgerRow({ children, onEdit, onDelete }) {
   );
 }
 
-export default function ControleFinanceiro() {
+function PrimeStepApp() {
   const [vendas, setVendas] = useState([]);
   const [despesas, setDespesas] = useState([]);
   const [assinaturas, setAssinaturas] = useState([]);
@@ -1867,4 +1868,21 @@ export default function ControleFinanceiro() {
       )}
     </div>
   );
+}
+
+// Decide qual sistema mostrar: o Prime Step normalmente, ou o controle pessoal
+// quando o endereço termina em #pessoal (ex.: seusite.vercel.app/#pessoal).
+export default function App() {
+  const [rota, setRota] = useState(() => window.location.hash);
+
+  useEffect(() => {
+    function aoMudarHash() {
+      setRota(window.location.hash);
+    }
+    window.addEventListener("hashchange", aoMudarHash);
+    return () => window.removeEventListener("hashchange", aoMudarHash);
+  }, []);
+
+  if (rota === "#pessoal") return <ControlePessoal />;
+  return <PrimeStepApp />;
 }
