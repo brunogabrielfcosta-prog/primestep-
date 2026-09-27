@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, Wallet, Lock,
-  Search, ChevronLeft, ChevronRight, Package, Users, BarChart3, LogOut,
+  Search, ChevronLeft, ChevronRight, Package, Users, BarChart3, LogOut, Smartphone,
 } from "lucide-react";
 import { supabase } from "./App.jsx";
 
@@ -46,6 +46,12 @@ function rowToFiado(row) {
 }
 function rowToPagamentoFiado(row) {
   return { id: row.id, cliente: row.cliente, valor: Number(row.valor), data: row.data };
+}
+function rowToVenda(row) {
+  return {
+    id: row.id, cliente: row.cliente, telefone: row.telefone || "", aparelho: row.aparelho, imei: row.imei,
+    custo: Number(row.custo), valorVenda: Number(row.valor_venda), data: row.data, observacao: row.observacao || "",
+  };
 }
 
 async function loadTabela(nome, mapper, orderBy = "data") {
@@ -249,6 +255,83 @@ function FiadoModal({ initial, onSave, onClose }) {
   );
 }
 
+// ---------- Modal: nova/editar venda de aparelho ----------
+function VendaModal({ initial, onSave, onClose }) {
+  const [cliente, setCliente] = useState(initial?.cliente || "");
+  const [telefone, setTelefone] = useState(initial?.telefone || "");
+  const [aparelho, setAparelho] = useState(initial?.aparelho || "");
+  const [imei, setImei] = useState(initial?.imei || "");
+  const [custo, setCusto] = useState(initial?.custo != null ? String(initial.custo) : "");
+  const [valorVenda, setValorVenda] = useState(initial?.valorVenda != null ? String(initial.valorVenda) : "");
+  const [data, setData] = useState(initial?.data || todayStr());
+  const [observacao, setObservacao] = useState(initial?.observacao || "");
+  const [error, setError] = useState("");
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!cliente.trim()) { setError("Informe o cliente."); return; }
+    if (!aparelho.trim()) { setError("Informe o aparelho."); return; }
+    if (!imei.trim()) { setError("Informe o IMEI."); return; }
+    const c = parseFloat(String(custo).replace(",", "."));
+    const v = parseFloat(String(valorVenda).replace(",", "."));
+    if (!v || v <= 0) { setError("Informe um valor de venda válido."); return; }
+    if (isNaN(c) || c < 0) { setError("Informe um valor de custo válido."); return; }
+    onSave({
+      id: initial?.id || uid(), cliente: cliente.trim(), telefone: telefone.trim(), aparelho: aparelho.trim(),
+      imei: imei.trim(), custo: c, valorVenda: v, data, observacao: observacao.trim(),
+    });
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,20,15,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 420, maxHeight: "90vh", overflowY: "auto" }}>
+        <LedgerCard style={{ padding: 22 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 17, fontWeight: 700, color: "var(--ink)" }}>{initial ? "Editar" : "Nova"} venda de aparelho</h3>
+            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)" }}><X size={18} /></button>
+          </div>
+          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <Field label="Cliente">
+              <input type="text" value={cliente} onChange={(e) => setCliente(e.target.value)} placeholder="Nome do cliente" style={inputStyle} />
+            </Field>
+            <Field label="Telefone (opcional)">
+              <input type="text" value={telefone} onChange={(e) => setTelefone(e.target.value)} placeholder="Ex: (65) 99999-0000" style={inputStyle} />
+            </Field>
+            <Field label="Aparelho">
+              <input type="text" value={aparelho} onChange={(e) => setAparelho(e.target.value)} placeholder="Ex: iPhone 12 128GB" style={inputStyle} />
+            </Field>
+            <Field label="IMEI">
+              <input type="text" inputMode="numeric" value={imei} onChange={(e) => setImei(e.target.value)} placeholder="Ex: 356789104561234" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+            </Field>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <Field label="Custo (R$)">
+                  <input type="text" inputMode="decimal" value={custo} onChange={(e) => setCusto(e.target.value)} placeholder="0,00" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+                </Field>
+              </div>
+              <div style={{ flex: 1 }}>
+                <Field label="Valor de venda (R$)">
+                  <input type="text" inputMode="decimal" value={valorVenda} onChange={(e) => setValorVenda(e.target.value)} placeholder="0,00" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+                </Field>
+              </div>
+            </div>
+            <Field label="Data">
+              <input type="date" value={data} onChange={(e) => setData(e.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="Observação (opcional)">
+              <input type="text" value={observacao} onChange={(e) => setObservacao(e.target.value)} placeholder="Ex: garantia de 3 meses" style={inputStyle} />
+            </Field>
+            {error && <div style={{ color: "var(--rust)", fontSize: 12.5 }}>{error}</div>}
+            <button type="submit" style={{ marginTop: 4, padding: "11px 14px", borderRadius: 5, border: "none", cursor: "pointer", background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 13.5 }}>
+              Salvar venda
+            </button>
+          </form>
+        </LedgerCard>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Modal: registrar pagamento (genérico p/ fornecedor ou cliente) ----------
 function PagamentoModal({ nome, saldoRestante, onSave, onClose }) {
   const [valor, setValor] = useState(saldoRestante > 0 ? String(saldoRestante) : "");
@@ -416,6 +499,7 @@ function Sidebar({ tab, setTab, onSair }) {
   const itens = [
     { id: "fornecedores", label: "Fornecedores", icon: Package },
     { id: "fiado", label: "Fiado", icon: Users },
+    { id: "vendas", label: "Vendas", icon: Smartphone },
     { id: "resumo", label: "Resumo", icon: BarChart3 },
   ];
   return (
@@ -460,6 +544,7 @@ function ControlePessoalApp({ onSair }) {
   const [pagamentosF, setPagamentosF] = useState([]);
   const [fiados, setFiados] = useState([]);
   const [pagamentosC, setPagamentosC] = useState([]);
+  const [vendas, setVendas] = useState([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("fornecedores");
   const now = new Date();
@@ -470,13 +555,14 @@ function ControlePessoalApp({ onSair }) {
 
   useEffect(() => {
     (async () => {
-      const [d, pf, f, pc] = await Promise.all([
+      const [d, pf, f, pc, v] = await Promise.all([
         loadTabela("pessoal_dividas", rowToDivida),
         loadTabela("pessoal_pagamentos", rowToPagamentoFornecedor),
         loadTabela("pessoal_fiado", rowToFiado),
         loadTabela("pessoal_fiado_pagamentos", rowToPagamentoFiado),
+        loadTabela("pessoal_vendas", rowToVenda),
       ]);
-      setDividas(d); setPagamentosF(pf); setFiados(f); setPagamentosC(pc);
+      setDividas(d); setPagamentosF(pf); setFiados(f); setPagamentosC(pc); setVendas(v);
       setLoading(false);
     })();
   }, []);
@@ -521,6 +607,20 @@ function ControlePessoalApp({ onSair }) {
   function excluirPagamentoCliente(id) {
     setPagamentosC((prev) => prev.filter((p) => p.id !== id));
     deleteLinha("pessoal_fiado_pagamentos", id);
+  }
+
+  function salvarVenda(item) {
+    const exists = vendas.some((v) => v.id === item.id);
+    setVendas((prev) => (exists ? prev.map((v) => (v.id === item.id ? item : v)) : [item, ...prev]));
+    upsertLinha("pessoal_vendas", {
+      id: item.id, cliente: item.cliente, telefone: item.telefone, aparelho: item.aparelho,
+      imei: item.imei, custo: item.custo, valor_venda: item.valorVenda, data: item.data, observacao: item.observacao,
+    });
+    setModal(null);
+  }
+  function excluirVenda(id) {
+    setVendas((prev) => prev.filter((v) => v.id !== id));
+    deleteLinha("pessoal_vendas", id);
   }
 
   // ---- Agrupamentos ----
@@ -604,6 +704,18 @@ function ControlePessoalApp({ onSair }) {
     pagamentosF.filter((p) => p.data === iso).forEach((p) => evs.push({ tipo: "pagamento", fornecedor: p.fornecedor, valor: p.valor }));
     return evs;
   }
+
+  // ---- Vendas de aparelhos (lucro) ----
+  const vendasFiltradas = useMemo(() => {
+    const termo = busca.toLowerCase();
+    return vendas.filter((v) => v.cliente.toLowerCase().includes(termo) || v.imei.toLowerCase().includes(termo) || v.aparelho.toLowerCase().includes(termo));
+  }, [vendas, busca]);
+
+  const vendasDoMes = useMemo(() => vendas.filter((v) => v.data?.startsWith(monthFilter)), [vendas, monthFilter]);
+  const faturadoNoMes = vendasDoMes.reduce((s, v) => s + v.valorVenda, 0);
+  const custoNoMes = vendasDoMes.reduce((s, v) => s + v.custo, 0);
+  const lucroNoMes = faturadoNoMes - custoNoMes;
+  const lucroTotal = vendas.reduce((s, v) => s + (v.valorVenda - v.custo), 0);
 
   // ---- Resumo geral ----
   const totalAPagar = resumoFornecedores.reduce((s, f) => s + Math.max(f.saldo, 0), 0);
@@ -782,6 +894,69 @@ function ControlePessoalApp({ onSair }) {
                 </div>
               )}
 
+              {tab === "vendas" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 780 }}>
+                  <h1 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 24, fontWeight: 800, color: "var(--ink)" }}>Vendas de aparelhos</h1>
+
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    <StatCard label="Faturado no mês" value={formatBRL(faturadoNoMes)} icon={TrendingUp} tone="up" />
+                    <StatCard label="Custo no mês" value={formatBRL(custoNoMes)} icon={TrendingDown} tone="down" />
+                    <StatCard label="Lucro no mês" value={formatBRL(lucroNoMes)} icon={Wallet} tone={lucroNoMes >= 0 ? "up" : "down"} />
+                  </div>
+
+                  <LedgerCard style={{ padding: 18 }}>
+                    <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 12 }}>Nova venda de aparelho</div>
+                    <button
+                      onClick={() => setModal({ type: "venda" })}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 16px", borderRadius: 5, border: "none", cursor: "pointer", background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 13 }}
+                    >
+                      <Plus size={15} /> Nova venda
+                    </button>
+                  </LedgerCard>
+
+                  <div style={{ position: "relative" }}>
+                    <Search size={15} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--muted)" }} />
+                    <input type="text" value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Buscar por cliente, aparelho ou IMEI..." style={{ ...inputStyle, width: "100%", paddingLeft: 34 }} />
+                  </div>
+
+                  {vendasFiltradas.length === 0 ? (
+                    <div style={{ padding: "20px 6px", textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>Nenhuma venda registrada ainda.</div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {vendasFiltradas
+                        .slice()
+                        .sort((a, b) => (a.data < b.data ? 1 : -1))
+                        .map((v) => {
+                          const lucro = v.valorVenda - v.custo;
+                          return (
+                            <LedgerCard key={v.id} style={{ padding: "14px 16px", borderLeft: `3px solid ${lucro >= 0 ? "var(--green)" : "var(--rust)"}` }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                                <div>
+                                  <strong style={{ fontFamily: "Inter, sans-serif", fontSize: 14, color: "var(--ink)" }}>{v.cliente}</strong>
+                                  {v.telefone && <span style={{ fontSize: 11.5, color: "var(--muted)", marginLeft: 8 }}>{v.telefone}</span>}
+                                  <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>{v.aparelho}</div>
+                                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "var(--muted)", marginTop: 3 }}>IMEI: {v.imei}</div>
+                                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{formatDateBR(v.data)}</div>
+                                  {v.observacao && <div style={{ fontSize: 11.5, color: "var(--ink)", marginTop: 3, fontStyle: "italic" }}>{v.observacao}</div>}
+                                </div>
+                                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                                  <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase" }}>Lucro</span>
+                                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 16, color: lucro >= 0 ? "var(--green)" : "var(--rust)" }}>{formatBRL(lucro)}</span>
+                                  <span style={{ fontSize: 10.5, color: "var(--muted)" }}>venda {formatBRL(v.valorVenda)} · custo {formatBRL(v.custo)}</span>
+                                  <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                                    <button onClick={() => setModal({ type: "venda", initial: v })} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 2 }}><Pencil size={13} /></button>
+                                    <button onClick={() => excluirVenda(v.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 2 }}><Trash2 size={13} /></button>
+                                  </div>
+                                </div>
+                              </div>
+                            </LedgerCard>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {tab === "resumo" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 780 }}>
                   <h1 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 24, fontWeight: 800, color: "var(--ink)" }}>Resumo geral</h1>
@@ -790,6 +965,11 @@ function ControlePessoalApp({ onSair }) {
                     <StatCard label="Total a pagar" value={formatBRL(totalAPagar)} icon={TrendingDown} tone="down" />
                     <StatCard label="Total a receber" value={formatBRL(totalAReceber)} icon={TrendingUp} tone="up" />
                     <StatCard label="Saldo líquido" value={formatBRL(saldoLiquido)} icon={Wallet} tone={saldoLiquido >= 0 ? "up" : "down"} />
+                  </div>
+
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    <StatCard label="Lucro no mês (aparelhos)" value={formatBRL(lucroNoMes)} icon={Smartphone} tone={lucroNoMes >= 0 ? "up" : "down"} />
+                    <StatCard label="Lucro total (aparelhos)" value={formatBRL(lucroTotal)} icon={Wallet} tone={lucroTotal >= 0 ? "up" : "down"} />
                   </div>
 
                   {topFornecedores.length > 0 && (
@@ -818,6 +998,7 @@ function ControlePessoalApp({ onSair }) {
 
       {modal && modal.type === "divida" && <DividaModal initial={modal.initial} onSave={salvarDivida} onClose={() => setModal(null)} />}
       {modal && modal.type === "fiado" && <FiadoModal initial={modal.initial} onSave={salvarFiado} onClose={() => setModal(null)} />}
+      {modal && modal.type === "venda" && <VendaModal initial={modal.initial} onSave={salvarVenda} onClose={() => setModal(null)} />}
       {modal && modal.type === "pagamentoF" && (
         <PagamentoModal nome={modal.nome} saldoRestante={modal.saldo} onSave={(p) => registrarPagamentoFornecedor(modal.nome, p)} onClose={() => setModal(null)} />
       )}
