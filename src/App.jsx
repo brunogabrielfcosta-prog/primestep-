@@ -1040,6 +1040,7 @@ function PrimeStepApp() {
 
   const [selectedDia, setSelectedDia] = useState(null);
   const [pieScope, setPieScope] = useState("mes"); // 'mes' | 'todos'
+  const [despesaScope, setDespesaScope] = useState("mes"); // 'mes' | 'todos'
   const [compareMonths, setCompareMonths] = useState([]);
 
   useEffect(() => {
@@ -1064,6 +1065,21 @@ function PrimeStepApp() {
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value);
   }, [vendas, vendasMes, pieScope]);
+
+  // Despesas agrupadas por categoria, pra ver no que mais se gastou.
+  const despesaPieData = useMemo(() => {
+    const source = despesaScope === "mes" ? despesasMes : despesas;
+    const totals = {};
+    source.forEach((d) => {
+      const cat = d.categoria || "Outros";
+      totals[cat] = (totals[cat] || 0) + Number(d.valor || 0);
+    });
+    return Object.entries(totals)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+  }, [despesas, despesasMes, despesaScope]);
+  const maiorCategoriaGasto = despesaPieData.length ? despesaPieData[0] : null;
+  const totalDespesaPie = despesaPieData.reduce((s, x) => s + x.value, 0);
 
   function toggleCompareMonth(key) {
     setCompareMonths((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key].sort()));
@@ -1360,6 +1376,70 @@ function PrimeStepApp() {
                         })}
                       </div>
                     </div>
+                  )}
+                </LedgerCard>
+
+                {/* Pie chart: no que mais se gastou */}
+                <LedgerCard style={{ padding: "16px 16px 10px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 8 }}>
+                    <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
+                      No que mais se gastou (por categoria)
+                    </span>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      {[["mes", monthLabel(monthFilter)], ["todos", "Todo período"]].map(([key, label]) => (
+                        <button
+                          key={key}
+                          onClick={() => setDespesaScope(key)}
+                          style={{
+                            padding: "5px 10px", borderRadius: 4, border: "1px solid var(--paper-line)",
+                            background: despesaScope === key ? "var(--ink)" : "transparent",
+                            color: despesaScope === key ? "var(--paper)" : "var(--muted)",
+                            fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 11.5, cursor: "pointer",
+                          }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {despesaPieData.length === 0 ? (
+                    <div style={{ padding: "26px 6px", textAlign: "center", color: "var(--muted)", fontFamily: "Inter, sans-serif", fontSize: 13.5 }}>
+                      Nenhuma despesa registrada {despesaScope === "mes" ? "neste mês" : "ainda"}.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                        <ResponsiveContainer width={220} height={220}>
+                          <PieChart>
+                            <Pie data={despesaPieData} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={48} outerRadius={80} paddingAngle={2}>
+                              {despesaPieData.map((_, i) => (
+                                <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                              ))}
+                            </Pie>
+                            <Tooltip formatter={(v) => formatBRL(v)} contentStyle={{ background: "var(--paper)", border: "1px solid var(--paper-line)", borderRadius: 6, fontFamily: "Inter, sans-serif", fontSize: 12.5 }} />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 7, flex: 1, minWidth: 180, padding: "6px 4px" }}>
+                          {despesaPieData.map((p, i) => {
+                            const pct = totalDespesaPie ? ((p.value / totalDespesaPie) * 100).toFixed(0) : 0;
+                            return (
+                              <div key={p.name} style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "Inter, sans-serif", fontSize: 12.5 }}>
+                                <span style={{ width: 9, height: 9, borderRadius: 2, background: PIE_COLORS[i % PIE_COLORS.length], flexShrink: 0 }} />
+                                <span style={{ color: "var(--ink)", flex: 1 }}>{p.name}</span>
+                                <span style={{ color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5 }}>{pct}%</span>
+                                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: "var(--rust)" }}>{formatBRL(p.value)}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      {maiorCategoriaGasto && (
+                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--paper-line)", fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--rust)", fontWeight: 600 }}>
+                          🔎 Categoria que mais pesa: {maiorCategoriaGasto.name} — {formatBRL(maiorCategoriaGasto.value)}
+                          {totalDespesaPie ? ` (${((maiorCategoriaGasto.value / totalDespesaPie) * 100).toFixed(0)}% do total)` : ""}
+                        </div>
+                      )}
+                    </>
                   )}
                 </LedgerCard>
 
