@@ -38,7 +38,7 @@ const CATALOGO_SERVICOS = [
 const CATEGORIAS_DESPESA = ["Produtos e insumos", "Aluguel", "Salários", "Marketing", "Impostos", "Equipamentos", "Outros"];
 
 // De onde o cliente veio. Para mudar as opções, é só editar esta lista.
-const ORIGENS_CLIENTE = ["Instagram", "Indicação", "WhatsApp", "Google", "Passou na loja", "Já era cliente", "Outro"];
+const ORIGENS_CLIENTE = ["Instagram", "Facebook", "WhatsApp", "Pessoal", "Indicação"];
 
 // Serviços que não representam um par de tênis (não entram na sugestão de pares).
 const SERVICOS_SEM_PAR = ["Taxa de Entrega"];
