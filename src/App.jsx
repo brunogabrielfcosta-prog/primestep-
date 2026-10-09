@@ -37,6 +37,12 @@ const CATALOGO_SERVICOS = [
 
 const CATEGORIAS_DESPESA = ["Produtos e insumos", "Aluguel", "Salários", "Marketing", "Impostos", "Equipamentos", "Outros"];
 
+// De onde o cliente veio. Para mudar as opções, é só editar esta lista.
+const ORIGENS_CLIENTE = ["Instagram", "Indicação", "WhatsApp", "Google", "Passou na loja", "Já era cliente", "Outro"];
+
+// Serviços que não representam um par de tênis (não entram na sugestão de pares).
+const SERVICOS_SEM_PAR = ["Taxa de Entrega"];
+
 const PLANOS_ASSINATURA = [
   {
     id: "basic",
@@ -95,12 +101,44 @@ function formatDateBR(d) {
   return `${day}/${m}/${y}`;
 }
 
+// ---------- Pares de tênis ----------
+// Sugestão de pares a partir dos serviços: a maior quantidade entre os serviços
+// que são feitos no tênis (ex.: Higienização x2 + Blindagem x2 = 2 pares).
+function estimarPares(itens) {
+  const qtds = (itens || [])
+    .filter((it) => !SERVICOS_SEM_PAR.includes(it.servico))
+    .map((it) => parseInt(it.quantidade, 10) || 1);
+  return qtds.length ? Math.max(...qtds) : 0;
+}
+
+// Pares de uma venda: usa o número informado no lançamento. Vendas antigas,
+// lançadas antes desse campo existir, usam a sugestão calculada pelos serviços.
+function paresDaVenda(v) {
+  if (v.pares != null) return Number(v.pares) || 0;
+  if (v.assinaturaId) return 0;
+  const itens = v.itens?.length ? v.itens : v.servico ? [{ servico: v.servico }] : [];
+  return estimarPares(itens);
+}
+
+function somaPares(lista) {
+  return lista.reduce((s, v) => s + paresDaVenda(v), 0);
+}
+
+function labelPares(n) {
+  return `${n} par${n === 1 ? "" : "es"}`;
+}
+
+function contarClientes(lista) {
+  return new Set(lista.map((v) => (v.cliente || "").trim().toLowerCase())).size;
+}
+
 // ---------- Banco de dados (Supabase) ----------
 // Converte uma linha do banco de volta para o formato que o app usa.
 function rowToVenda(row) {
   return {
     id: row.id, data: row.data, cliente: row.cliente, status: row.status, itens: row.itens || [], valor: Number(row.valor),
     assinaturaId: row.assinatura_id || null, mesReferencia: row.mes_referencia || null,
+    origem: row.origem || null, pares: row.pares != null ? Number(row.pares) : null,
   };
 }
 function rowToDespesa(row) {
@@ -151,12 +189,36 @@ async function loadPedidos() {
   }
   return (data || []).map(rowToPedido);
 }
+
+let avisoColunasMostrado = false;
 async function upsertVenda(v) {
-  const { error } = await supabase.from("vendas").upsert({
+  const base = {
     id: v.id, data: v.data, cliente: v.cliente, status: v.status, itens: v.itens, valor: v.valor,
     assinatura_id: v.assinaturaId || null, mes_referencia: v.mesReferencia || null,
+  };
+  const { error } = await supabase.from("vendas").upsert({
+    ...base, origem: v.origem || null, pares: v.pares != null ? v.pares : null,
   });
-  if (error) console.error("Erro ao salvar venda", error);
+  if (!error) return;
+
+  // Se as colunas "origem" e "pares" ainda não foram criadas no Supabase, salva a venda
+  // sem elas (para não perder o lançamento) e avisa uma vez.
+  const faltamColunas = error.code === "PGRST204" || /origem|pares/i.test(error.message || "");
+  if (faltamColunas) {
+    const retry = await supabase.from("vendas").upsert(base);
+    if (!retry.error) {
+      if (!avisoColunasMostrado) {
+        avisoColunasMostrado = true;
+        window.alert(
+          "A venda foi salva, mas a ORIGEM e os PARES não foram gravados: faltam as colunas \"origem\" e \"pares\" na tabela de vendas do Supabase. Crie as colunas e lance de novo."
+        );
+      }
+      return;
+    }
+    console.error("Erro ao salvar venda", retry.error);
+    return;
+  }
+  console.error("Erro ao salvar venda", error);
 }
 async function deleteVendaRow(id) {
   const { error } = await supabase.from("vendas").delete().eq("id", id);
@@ -261,6 +323,10 @@ function EntryModal({ type, initial, onSave, onClose }) {
   const [categoria, setCategoria] = useState(initial?.categoria || CATEGORIAS_DESPESA[0]);
   const [status, setStatus] = useState(initial?.status || "pago");
   const [valor, setValor] = useState(initial?.valor != null ? String(initial.valor) : "");
+  const [origem, setOrigem] = useState(initial?.origem || "");
+  // Pares: enquanto você não mexer no campo, ele acompanha a sugestão calculada pelos serviços.
+  const [pares, setPares] = useState(initial?.pares != null ? Number(initial.pares) : 0);
+  const [paresManual, setParesManual] = useState(initial?.pares != null);
   const [itens, setItens] = useState(() => {
     if (!isVenda) return [];
     const source = initial?.itens?.length ? initial.itens : initial?.servico ? [{ servico: initial.servico, valor: initial.valor }] : null;
@@ -280,6 +346,14 @@ function EntryModal({ type, initial, onSave, onClose }) {
     return preco * qtd;
   }
   const total = itens.reduce((s, it) => s + itemSubtotal(it), 0);
+
+  const sugestaoPares = initial?.assinaturaId ? 0 : estimarPares(itens);
+  const paresValor = paresManual ? pares : sugestaoPares;
+  function definirPares(n) {
+    setPares(Math.max(0, n));
+    setParesManual(true);
+  }
+  const opcoesOrigem = origem && !ORIGENS_CLIENTE.includes(origem) ? [...ORIGENS_CLIENTE, origem] : ORIGENS_CLIENTE;
 
   function updateItem(itemId, patch) {
     setItens((prev) => prev.map((it) => (it.itemId === itemId ? { ...it, ...patch } : it)));
@@ -306,6 +380,11 @@ function EntryModal({ type, initial, onSave, onClose }) {
       return;
     }
     if (isVenda) {
+      // Em venda nova a origem é obrigatória; ao editar uma venda antiga, é opcional.
+      if (!initial?.id && !origem) {
+        setError("Informe de onde veio o cliente.");
+        return;
+      }
       for (const it of itens) {
         if (it.sel === "custom" && !it.servico.trim()) {
           setError("Informe o nome de todos os serviços adicionados.");
@@ -322,7 +401,11 @@ function EntryModal({ type, initial, onSave, onClose }) {
         valor: itemSubtotal(it),
       }));
       const totalClean = itensClean.reduce((s, it) => s + it.valor, 0);
-      onSave({ id: initial?.id || uid(), data, cliente: nome.trim(), status, itens: itensClean, valor: totalClean });
+      onSave({
+        id: initial?.id || uid(), data, cliente: nome.trim(), status, itens: itensClean, valor: totalClean,
+        origem: origem || null, pares: paresValor,
+        assinaturaId: initial?.assinaturaId || null, mesReferencia: initial?.mesReferencia || null,
+      });
     } else {
       const v = parseFloat(String(valor).replace(",", "."));
       if (!v || v <= 0) {
@@ -345,7 +428,7 @@ function EntryModal({ type, initial, onSave, onClose }) {
         <LedgerCard style={{ padding: 22 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
             <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>
-              {initial ? "Editar" : "Novo"} {isVenda ? "registro de venda" : "registro de despesa"}
+              {initial?.id ? "Editar" : "Novo"} {isVenda ? "registro de venda" : "registro de despesa"}
             </h3>
             <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
               <X size={18} />
@@ -364,6 +447,17 @@ function EntryModal({ type, initial, onSave, onClose }) {
                 style={inputStyle}
               />
             </Field>
+
+            {isVenda && (
+              <Field label="De onde veio o cliente?">
+                <select value={origem} onChange={(e) => setOrigem(e.target.value)} style={inputStyle}>
+                  <option value="">Selecione…</option>
+                  {opcoesOrigem.map((o) => (
+                    <option key={o} value={o}>{o}</option>
+                  ))}
+                </select>
+              </Field>
+            )}
 
             {isVenda ? (
               <>
@@ -462,6 +556,41 @@ function EntryModal({ type, initial, onSave, onClose }) {
                   >
                     <Plus size={13} /> Adicionar serviço
                   </button>
+                </div>
+
+                {/* Quantidade de pares dessa venda */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 5, fontFamily: "Inter, sans-serif" }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--muted)" }}>
+                    Quantos pares nessa venda?
+                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", border: "1px solid var(--paper-line)", borderRadius: 5, overflow: "hidden" }}>
+                      <button
+                        type="button"
+                        onClick={() => definirPares(paresValor - 1)}
+                        style={{ border: "none", background: "#FFFDF8", width: 32, height: 36, cursor: "pointer", color: "var(--ink)", fontWeight: 700 }}
+                      >
+                        −
+                      </button>
+                      <input
+                        type="number"
+                        min={0}
+                        value={paresValor}
+                        onChange={(e) => definirPares(parseInt(e.target.value, 10) || 0)}
+                        style={{ ...inputStyle, border: "none", borderLeft: "1px solid var(--paper-line)", borderRight: "1px solid var(--paper-line)", borderRadius: 0, width: 54, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => definirPares(paresValor + 1)}
+                        style={{ border: "none", background: "#FFFDF8", width: 32, height: 36, cursor: "pointer", color: "var(--ink)", fontWeight: 700 }}
+                      >
+                        +
+                      </button>
+                    </div>
+                    <span style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.4, flex: 1 }}>
+                      {paresManual ? "Ajustado por você." : "Sugerido pelos serviços — ajuste se for diferente."}
+                    </span>
+                  </div>
                 </div>
 
                 <Field label="Status do pagamento">
@@ -730,6 +859,8 @@ function DayDetailModal({ iso, vendasDoDia, onEdit, onDelete, onAddNew, onClose 
   const [y, m, d] = iso.split("-").map(Number);
   const dow = new Date(y, m - 1, d).getDay();
   const total = vendasDoDia.reduce((s, v) => s + Number(v.valor || 0), 0);
+  const clientesDia = contarClientes(vendasDoDia);
+  const paresDia = somaPares(vendasDoDia);
 
   return (
     <div
@@ -758,7 +889,7 @@ function DayDetailModal({ iso, vendasDoDia, onEdit, onDelete, onAddNew, onClose 
           {vendasDoDia.length > 0 && (
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid var(--paper-line)", marginBottom: 8 }}>
               <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>
-                {vendasDoDia.length} venda{vendasDoDia.length > 1 ? "s" : ""} nesse dia
+                {clientesDia} cliente{clientesDia > 1 ? "s" : ""} · <strong style={{ color: "var(--ink)" }}>{labelPares(paresDia)}</strong>
               </span>
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: "var(--green)" }}>
                 {formatBRL(total)}
@@ -783,6 +914,10 @@ function DayDetailModal({ iso, vendasDoDia, onEdit, onDelete, onAddNew, onClose 
                         ? [v.servico]
                         : []
                       ).join(", ")}
+                    </div>
+                    <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--ink)", marginTop: 3 }}>
+                      {labelPares(paresDaVenda(v))}
+                      {v.origem ? ` · ${v.origem}` : ""}
                     </div>
                     <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 5, fontSize: 11, fontWeight: 600, color: v.status === "pago" ? "var(--green)" : "var(--rust)" }}>
                       {v.status === "pago" ? <Check size={11} /> : <Clock size={11} />}
@@ -996,6 +1131,8 @@ function PrimeStepApp() {
       valor: sub.valorMensal,
       assinaturaId: sub.id,
       mesReferencia: mesKey,
+      origem: null,
+      pares: 0, // a cobrança da mensalidade não é um par feito
     };
     persistVendas([entry, ...vendas], { type: "upsert", item: entry });
   }
@@ -1007,6 +1144,7 @@ function PrimeStepApp() {
   const totalDespesas = despesasMes.reduce((s, d) => s + Number(d.valor || 0), 0);
   const saldo = totalReceitas - totalDespesas;
   const pendentes = vendasMes.filter((v) => v.status === "pendente").reduce((s, v) => s + Number(v.valor || 0), 0);
+  const paresMes = somaPares(vendasMes);
 
   const chartData = useMemo(() => {
     const arr = [];
@@ -1041,6 +1179,7 @@ function PrimeStepApp() {
   const [selectedDia, setSelectedDia] = useState(null);
   const [pieScope, setPieScope] = useState("mes"); // 'mes' | 'todos'
   const [despesaScope, setDespesaScope] = useState("mes"); // 'mes' | 'todos'
+  const [origemScope, setOrigemScope] = useState("mes"); // 'mes' | 'todos'
   const [compareMonths, setCompareMonths] = useState([]);
 
   useEffect(() => {
@@ -1065,6 +1204,24 @@ function PrimeStepApp() {
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value);
   }, [vendas, vendasMes, pieScope]);
+
+  // De onde vieram os clientes: vendas, pares e receita por origem.
+  // As cobranças de mensalidade de assinatura ficam de fora (não são cliente chegando).
+  const origemData = useMemo(() => {
+    const source = (origemScope === "mes" ? vendasMes : vendas).filter((v) => !v.assinaturaId);
+    const mapa = {};
+    source.forEach((v) => {
+      const nome = v.origem || "Não informado";
+      if (!mapa[nome]) mapa[nome] = { name: nome, vendas: 0, pares: 0, receita: 0 };
+      mapa[nome].vendas += 1;
+      mapa[nome].pares += paresDaVenda(v);
+      mapa[nome].receita += Number(v.valor || 0);
+    });
+    return Object.values(mapa).sort((a, b) => b.vendas - a.vendas || b.receita - a.receita);
+  }, [vendas, vendasMes, origemScope]);
+  const totalVendasOrigem = origemData.reduce((s, o) => s + o.vendas, 0);
+  const maxVendasOrigem = Math.max(1, ...origemData.map((o) => o.vendas));
+  const melhorOrigem = origemData.find((o) => o.name !== "Não informado") || null;
 
   // Despesas agrupadas por categoria, pra ver no que mais se gastou.
   const despesaPieData = useMemo(() => {
@@ -1095,7 +1252,7 @@ function PrimeStepApp() {
         const receita = vs.reduce((s, v) => s + Number(v.valor || 0), 0);
         const despesa = ds.reduce((s, d) => s + Number(d.valor || 0), 0);
         const qtdServicos = vs.reduce((s, v) => s + getItens(v).length, 0);
-        return { key, label: monthLabel(key), receita, despesa, saldo: receita - despesa, qtdServicos, qtdVendas: vs.length };
+        return { key, label: monthLabel(key), receita, despesa, saldo: receita - despesa, qtdServicos, qtdVendas: vs.length, qtdPares: somaPares(vs) };
       });
   }, [vendas, despesas, compareMonths]);
 
@@ -1113,7 +1270,7 @@ function PrimeStepApp() {
   }, [vendas]);
   const melhorDiaSemana = vendasPorDiaSemana.length ? vendasPorDiaSemana.reduce((a, b) => (b.total > a.total ? b : a)) : null;
 
-  // Grade de calendário do mês selecionado, com o total vendido em cada dia.
+  // Grade de calendário do mês selecionado, com o total vendido e os pares de cada dia.
   const calendarioSemanas = useMemo(() => {
     const [y, m] = monthFilter.split("-").map(Number);
     const diasNoMes = new Date(y, m, 0).getDate();
@@ -1124,7 +1281,7 @@ function PrimeStepApp() {
       const iso = `${monthFilter}-${String(dia).padStart(2, "0")}`;
       const vendasDoDia = vendas.filter((v) => v.data === iso);
       const total = vendasDoDia.reduce((s, v) => s + Number(v.valor || 0), 0);
-      celulas.push({ dia, iso, total, qtd: vendasDoDia.length });
+      celulas.push({ dia, iso, total, qtd: vendasDoDia.length, pares: somaPares(vendasDoDia) });
     }
     while (celulas.length % 7 !== 0) celulas.push(null);
     const semanas = [];
@@ -1257,6 +1414,7 @@ function PrimeStepApp() {
               <StatCard label="Despesas do mês" value={formatBRL(totalDespesas)} icon={TrendingDown} tone="down" />
               <StatCard label="Saldo" value={formatBRL(saldo)} icon={Wallet} tone={saldo >= 0 ? "up" : "down"} />
               <StatCard label="A receber (pendente)" value={formatBRL(pendentes)} icon={Clock} />
+              <StatCard label="Pares feitos no mês" value={String(paresMes)} icon={Check} />
             </div>
 
             {/* Chart */}
@@ -1322,6 +1480,63 @@ function PrimeStepApp() {
 
             {tab === "analises" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 4 }}>
+                {/* De onde vêm os clientes */}
+                <LedgerCard style={{ padding: "16px 16px 14px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 8 }}>
+                    <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
+                      De onde vêm os clientes
+                    </span>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      {[["mes", monthLabel(monthFilter)], ["todos", "Todo período"]].map(([key, label]) => (
+                        <button
+                          key={key}
+                          onClick={() => setOrigemScope(key)}
+                          style={{
+                            padding: "5px 10px", borderRadius: 4, border: "1px solid var(--paper-line)",
+                            background: origemScope === key ? "var(--ink)" : "transparent",
+                            color: origemScope === key ? "var(--paper)" : "var(--muted)",
+                            fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 11.5, cursor: "pointer",
+                          }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {origemData.length === 0 ? (
+                    <div style={{ padding: "26px 6px", textAlign: "center", color: "var(--muted)", fontFamily: "Inter, sans-serif", fontSize: 13.5 }}>
+                      Nenhuma venda registrada {origemScope === "mes" ? "neste mês" : "ainda"}.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
+                        {origemData.map((o) => {
+                          const pct = totalVendasOrigem ? ((o.vendas / totalVendasOrigem) * 100).toFixed(0) : 0;
+                          const semInfo = o.name === "Não informado";
+                          return (
+                            <div key={o.name} style={{ fontFamily: "Inter, sans-serif" }}>
+                              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+                                <span style={{ fontSize: 13, fontWeight: 700, color: semInfo ? "var(--muted)" : "var(--ink)" }}>{o.name}</span>
+                                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "var(--muted)" }}>
+                                  {o.vendas} venda{o.vendas > 1 ? "s" : ""} ({pct}%) · {labelPares(o.pares)} · <span style={{ color: "var(--ink)", fontWeight: 600 }}>{formatBRL(o.receita)}</span>
+                                </span>
+                              </div>
+                              <div style={{ height: 12, background: "#EFEBE1", borderRadius: 4, overflow: "hidden" }}>
+                                <div style={{ width: `${(o.vendas / maxVendasOrigem) * 100}%`, height: "100%", background: semInfo ? "var(--muted)" : "var(--green)", borderRadius: 4 }} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {melhorOrigem && (
+                        <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--paper-line)", fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--green)", fontWeight: 600 }}>
+                          🏆 Canal que mais trouxe cliente: {melhorOrigem.name} — {melhorOrigem.vendas} venda{melhorOrigem.vendas > 1 ? "s" : ""}, {formatBRL(melhorOrigem.receita)}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </LedgerCard>
+
                 {/* Pie chart: serviço mais vendido */}
                 <LedgerCard style={{ padding: "16px 16px 10px" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 8 }}>
@@ -1487,7 +1702,7 @@ function PrimeStepApp() {
                         <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Inter, sans-serif", fontSize: 12.5 }}>
                           <thead>
                             <tr style={{ borderBottom: "1px solid var(--paper-line)" }}>
-                              {["Mês", "Vendas", "Serviços", "Receita", "Despesa", "Saldo"].map((h) => (
+                              {["Mês", "Vendas", "Pares", "Serviços", "Receita", "Despesa", "Saldo"].map((h) => (
                                 <th key={h} style={{ textAlign: h === "Mês" ? "left" : "right", padding: "6px 8px", color: "var(--muted)", fontWeight: 600, fontSize: 11 }}>{h}</th>
                               ))}
                             </tr>
@@ -1497,6 +1712,7 @@ function PrimeStepApp() {
                               <tr key={row.key} style={{ borderBottom: "1px solid var(--paper-line)" }}>
                                 <td style={{ padding: "7px 8px", fontFamily: "'JetBrains Mono', monospace" }}>{row.label}</td>
                                 <td style={{ padding: "7px 8px", textAlign: "right" }}>{row.qtdVendas}</td>
+                                <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 700 }}>{row.qtdPares}</td>
                                 <td style={{ padding: "7px 8px", textAlign: "right" }}>{row.qtdServicos}</td>
                                 <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace", color: "var(--green)" }}>{formatBRL(row.receita)}</td>
                                 <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace", color: "var(--rust)" }}>{formatBRL(row.despesa)}</td>
@@ -1519,7 +1735,7 @@ function PrimeStepApp() {
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                     <Calendar size={15} color="var(--ink)" />
                     <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
-                      Vendas em {monthLabel(monthFilter)}
+                      Vendas em {monthLabel(monthFilter)} — {labelPares(paresMes)}
                     </span>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 6 }}>
@@ -1547,7 +1763,7 @@ function PrimeStepApp() {
                             <div
                               key={ci}
                               onClick={() => setSelectedDia(cel.iso)}
-                              title={cel.total > 0 ? `${formatDateBR(cel.iso)}: ${formatBRL(cel.total)} (${cel.qtd} venda${cel.qtd > 1 ? "s" : ""}) — toque para ver` : `${formatDateBR(cel.iso)} — toque para registrar`}
+                              title={cel.total > 0 ? `${formatDateBR(cel.iso)}: ${formatBRL(cel.total)} (${cel.qtd} venda${cel.qtd > 1 ? "s" : ""}, ${labelPares(cel.pares)}) — toque para ver` : `${formatDateBR(cel.iso)} — toque para registrar`}
                               style={{
                                 aspectRatio: "1", borderRadius: 5, padding: "4px 3px", cursor: "pointer",
                                 background: cel.total > 0 ? `rgba(75,101,82,${intensidade})` : "#FFFDF8",
@@ -1556,7 +1772,12 @@ function PrimeStepApp() {
                                 transition: "transform 0.1s",
                               }}
                             >
-                              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "var(--muted)" }}>{cel.dia}</span>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 2 }}>
+                                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "var(--muted)" }}>{cel.dia}</span>
+                                {cel.pares > 0 && (
+                                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 700, color: "var(--ink)" }}>{cel.pares}p</span>
+                                )}
+                              </div>
                               {cel.total > 0 && (
                                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 700, color: "var(--ink)", lineHeight: 1.1 }}>
                                   {cel.total >= 1000 ? `${(cel.total / 1000).toFixed(1)}k` : cel.total.toFixed(0)}
@@ -1865,6 +2086,10 @@ function PrimeStepApp() {
                               ? [v.servico]
                               : []
                             ).join(", ")}
+                          </span>
+                          <span style={{ display: "block", fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                            <span style={{ color: "var(--ink)", fontWeight: 600 }}>{labelPares(paresDaVenda(v))}</span>
+                            {v.origem ? ` · ${v.origem}` : ""}
                           </span>
                         </span>
                         <span
