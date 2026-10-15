@@ -43,6 +43,12 @@ const ORIGENS_CLIENTE = ["Instagram", "Facebook", "WhatsApp", "Pessoal", "Indica
 // Serviços que não representam um par de tênis (não entram na sugestão de pares).
 const SERVICOS_SEM_PAR = ["Taxa de Entrega"];
 
+// Metas de faturamento por mês (AAAA-MM). As metas salvas pelo próprio sistema
+// (botão "Editar meta", tabela "metas" no Supabase) têm prioridade sobre estas.
+const METAS_PADRAO = {
+  "2026-10": { meta: 4000, superMeta: 5000 },
+};
+
 const PLANOS_ASSINATURA = [
   {
     id: "basic",
@@ -188,6 +194,28 @@ async function loadPedidos() {
     return [];
   }
   return (data || []).map(rowToPedido);
+}
+
+async function loadMetas() {
+  const { data, error } = await supabase.from("metas").select("*");
+  if (error) {
+    console.warn("Tabela de metas indisponível; usando as metas definidas no código.", error);
+    return {};
+  }
+  const out = {};
+  (data || []).forEach((r) => {
+    out[r.mes] = { meta: Number(r.meta), superMeta: Number(r.super_meta) };
+  });
+  return out;
+}
+async function upsertMeta(mes, m) {
+  const { error } = await supabase.from("metas").upsert({ mes, meta: m.meta, super_meta: m.superMeta });
+  if (error) {
+    console.error("Erro ao salvar meta", error);
+    window.alert(
+      "A meta mudou só nesta tela e volta ao valor anterior quando a página for recarregada: falta criar a tabela \"metas\" no Supabase."
+    );
+  }
 }
 
 let avisoColunasMostrado = false;
@@ -957,6 +985,415 @@ function DayDetailModal({ iso, vendasDoDia, onEdit, onDelete, onAddNew, onClose 
   );
 }
 
+// ---------- Meta do mês ----------
+function fmtPct(v) {
+  const n = Number.isFinite(v) ? v : 0;
+  return `${n.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}%`;
+}
+function fmtVar(v) {
+  return `${v >= 0 ? "+" : ""}${fmtPct(v)}`;
+}
+function temServico(v, termo) {
+  return (v.itens || []).some((it) => (it.servico || "").toLowerCase().includes(termo));
+}
+function somaValor(lista) {
+  return lista.reduce((s, v) => s + Number(v.valor || 0), 0);
+}
+
+// Calcula tudo sobre a meta de um mês: quanto foi feito, quanto falta, ritmo e pontos a melhorar.
+function analisarMeta(vendas, mesKey, alvo, hoje) {
+  const [y, m] = mesKey.split("-").map(Number);
+  const diasNoMes = new Date(y, m, 0).getDate();
+  const mesAtualKey = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}`;
+  const situacao = mesKey === mesAtualKey ? "atual" : mesKey < mesAtualKey ? "passado" : "futuro";
+  const diasDecorridos = situacao === "atual" ? hoje.getDate() : situacao === "passado" ? diasNoMes : 0;
+  // Dias que ainda dá para vender, contando hoje.
+  const diasRestantes = situacao === "atual" ? diasNoMes - hoje.getDate() + 1 : situacao === "futuro" ? diasNoMes : 0;
+
+  const doMes = vendas.filter((v) => v.data?.startsWith(mesKey));
+  const faturado = somaValor(doMes);
+  const pendente = somaValor(doMes.filter((v) => v.status === "pendente"));
+  const avulsas = doMes.filter((v) => !v.assinaturaId);
+  const receitaAvulsa = somaValor(avulsas);
+  const paresAvulsa = somaPares(avulsas);
+  const ticket = avulsas.length ? receitaAvulsa / avulsas.length : 0;
+  const porPar = paresAvulsa ? receitaAvulsa / paresAvulsa : 0;
+  const mediaDia = diasDecorridos ? faturado / diasDecorridos : 0;
+  const projecao = situacao === "atual" ? mediaDia * diasNoMes : faturado;
+
+  function alvoInfo(valor) {
+    const falta = Math.max(0, valor - faturado);
+    return {
+      valor,
+      falta,
+      batida: faturado >= valor,
+      acima: Math.max(0, faturado - valor),
+      pctFeito: valor ? (faturado / valor) * 100 : 0,
+      pctFalta: valor ? (falta / valor) * 100 : 0,
+      porDia: diasRestantes ? falta / diasRestantes : 0,
+      vendas: ticket ? Math.ceil(falta / ticket) : null,
+      pares: porPar ? Math.ceil(falta / porPar) : null,
+    };
+  }
+  const meta = alvoInfo(alvo.meta);
+  const superMeta = alvoInfo(alvo.superMeta);
+
+  // Mês anterior, até o mesmo dia, para comparar.
+  const prev = new Date(y, m - 2, 1);
+  const prevKey = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+  const diasPrev = new Date(prev.getFullYear(), prev.getMonth() + 1, 0).getDate();
+  const limite = Math.min(diasDecorridos, diasPrev);
+  const prevVendas = vendas.filter((v) => v.data?.startsWith(prevKey));
+  const prevAteDia = somaValor(prevVendas.filter((v) => Number(v.data.slice(8, 10)) <= limite));
+  const prevAvulsas = prevVendas.filter((v) => !v.assinaturaId);
+  const prevTicket = prevAvulsas.length ? somaValor(prevAvulsas) / prevAvulsas.length : 0;
+
+  const pontos = [];
+
+  // 1. Ritmo
+  if (situacao === "atual" && diasDecorridos > 0 && faturado > 0) {
+    if (projecao < alvo.meta) {
+      const aumento = mediaDia ? (meta.porDia / mediaDia - 1) * 100 : 0;
+      pontos.push({
+        tom: "atencao",
+        texto: `No ritmo atual (${formatBRL(mediaDia)} por dia), o mês fecha em cerca de ${formatBRL(projecao)}, ou ${fmtPct((projecao / alvo.meta) * 100)} da meta. Para bater a meta, a média precisa subir para ${formatBRL(meta.porDia)} por dia (${fmtVar(aumento)}).`,
+      });
+    } else if (projecao < alvo.superMeta) {
+      pontos.push({
+        tom: "ok",
+        texto: `No ritmo atual o mês fecha em cerca de ${formatBRL(projecao)}: a meta sai. Para a super meta, a média precisa ir de ${formatBRL(mediaDia)} para ${formatBRL(superMeta.porDia)} por dia.`,
+      });
+    } else {
+      pontos.push({
+        tom: "ok",
+        texto: `No ritmo atual o mês fecha em cerca de ${formatBRL(projecao)}, acima da super meta. É manter a média de ${formatBRL(mediaDia)} por dia.`,
+      });
+    }
+  }
+
+  // 2. Comparação com o mês anterior até o mesmo dia
+  if (diasDecorridos > 0 && prevAteDia > 0) {
+    const variacao = (faturado / prevAteDia - 1) * 100;
+    pontos.push({
+      tom: variacao >= 0 ? "ok" : "atencao",
+      texto: `Até o dia ${limite}, o mês passado tinha ${formatBRL(prevAteDia)}. Este mês, no mesmo período: ${formatBRL(faturado)} (${fmtVar(variacao)}).`,
+    });
+  }
+
+  // 3. Ticket médio
+  if (ticket && prevTicket) {
+    const vt = (ticket / prevTicket - 1) * 100;
+    if (vt <= -5) {
+      pontos.push({
+        tom: "atencao",
+        texto: `O ticket médio caiu de ${formatBRL(prevTicket)} para ${formatBRL(ticket)} por venda (${fmtVar(vt)}). Oferecer um serviço a mais em cada atendimento ajuda a recuperar.`,
+      });
+    } else if (vt >= 5) {
+      pontos.push({
+        tom: "ok",
+        texto: `O ticket médio subiu de ${formatBRL(prevTicket)} para ${formatBRL(ticket)} por venda (${fmtVar(vt)}).`,
+      });
+    }
+  }
+
+  // 4. Blindagem junto da higienização
+  const comHig = avulsas.filter((v) => temServico(v, "higieniza"));
+  const semBlind = comHig.filter((v) => !temServico(v, "blindagem"));
+  if (comHig.length >= 3 && semBlind.length > 0) {
+    const precoBlind = CATALOGO_SERVICOS.find((s) => s.nome.toLowerCase().includes("blindagem"))?.valor || 25;
+    const paresSem = semBlind.reduce((s, v) => s + (paresDaVenda(v) || 1), 0);
+    const ganho = Math.ceil(paresSem / 2) * precoBlind;
+    const taxa = ((comHig.length - semBlind.length) / comHig.length) * 100;
+    pontos.push({
+      tom: "atencao",
+      texto: `Só ${fmtPct(taxa)} das vendas com Higienização levaram Blindagem. Se metade dos ${paresSem} pares que ficaram sem ela tivesse levado, seriam ${formatBRL(ganho)} a mais (${fmtPct((ganho / alvo.meta) * 100)} da meta).`,
+    });
+  }
+
+  // 5. Valores pendentes
+  if (pendente > 0) {
+    pontos.push({
+      tom: "atencao",
+      texto: `${formatBRL(pendente)} ainda está pendente (${fmtPct((pendente / faturado) * 100)} do faturado). Cobrar garante que esse valor entre no caixa.`,
+    });
+  }
+
+  // 6. Canal que mais vende
+  const porOrigem = {};
+  avulsas.forEach((v) => {
+    if (!v.origem) return;
+    porOrigem[v.origem] = (porOrigem[v.origem] || 0) + Number(v.valor || 0);
+  });
+  const origens = Object.entries(porOrigem).sort((a, b) => b[1] - a[1]);
+  if (origens.length && receitaAvulsa) {
+    const [nome, valor] = origens[0];
+    pontos.push({
+      tom: "info",
+      texto: `${nome} é o canal que mais trouxe dinheiro: ${formatBRL(valor)} (${fmtPct((valor / receitaAvulsa) * 100)} das vendas avulsas). Vale reforçar a divulgação por ali.`,
+    });
+  }
+
+  return {
+    situacao, diasNoMes, diasDecorridos, diasRestantes,
+    faturado, pendente, ticket, porPar, mediaDia, projecao,
+    qtdVendas: avulsas.length, pares: paresAvulsa,
+    meta, superMeta, pontos,
+  };
+}
+
+function BarraMeta({ faturado, meta, superMeta, altura = 14 }) {
+  const escala = Math.max(superMeta, faturado) || 1;
+  const largura = Math.min(100, (faturado / escala) * 100);
+  const posMeta = (meta / escala) * 100;
+  const posSuper = (superMeta / escala) * 100;
+  return (
+    <div style={{ position: "relative", height: altura, background: "#EFEBE1", borderRadius: 4 }}>
+      <div style={{ width: `${largura}%`, height: "100%", background: "var(--green)", borderRadius: 4 }} />
+      <div title="Meta" style={{ position: "absolute", top: -3, bottom: -3, left: `calc(${posMeta}% - 1px)`, width: 2, background: "var(--ink)" }} />
+      <div title="Super meta" style={{ position: "absolute", top: -3, bottom: -3, left: `calc(${posSuper}% - 2px)`, width: 2, background: "#C7A96B" }} />
+    </div>
+  );
+}
+
+function MetaResumoTopo({ analise, onAbrir }) {
+  const { faturado, meta, superMeta } = analise;
+  const texto = superMeta.batida
+    ? `Super meta batida! ${formatBRL(superMeta.acima)} acima`
+    : meta.batida
+    ? `Meta batida · faltam ${formatBRL(superMeta.falta)} para a super meta`
+    : `Faltam ${formatBRL(meta.falta)} (${fmtPct(meta.pctFalta)}) para a meta`;
+  return (
+    <button
+      onClick={onAbrir}
+      style={{
+        display: "block", width: "100%", textAlign: "left", cursor: "pointer", marginBottom: 18,
+        background: "var(--paper)", border: "1px solid var(--paper-line)", borderRadius: 4, padding: "14px 16px",
+        fontFamily: "Inter, sans-serif", color: "var(--ink)",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <span style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
+          Meta do mês
+        </span>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 700 }}>
+          {formatBRL(faturado)} <span style={{ color: "var(--muted)", fontWeight: 500 }}>de {formatBRL(meta.valor)} · {fmtPct(meta.pctFeito)}</span>
+        </span>
+      </div>
+      <BarraMeta faturado={faturado} meta={meta.valor} superMeta={superMeta.valor} />
+      <div style={{ marginTop: 8, fontSize: 12.5, fontWeight: 600, color: meta.batida ? "var(--green)" : "var(--ink)" }}>
+        {texto} <span style={{ color: "var(--muted)", fontWeight: 500 }}>· ver análise →</span>
+      </div>
+    </button>
+  );
+}
+
+function MetaAlvoCard({ titulo, info, faturado, analise, cor }) {
+  const linha = { display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, padding: "5px 0", borderBottom: "1px solid var(--paper-line)" };
+  const valorStyle = { fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: "var(--ink)", textAlign: "right" };
+  return (
+    <LedgerCard style={{ padding: "14px 16px", flex: "1 1 260px", borderTop: `3px solid ${cor}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>
+          {titulo}
+        </span>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>{formatBRL(info.valor)}</span>
+      </div>
+      <div style={{ fontFamily: "Manrope, sans-serif", fontSize: 28, fontWeight: 800, color: info.batida ? "var(--green)" : "var(--ink)", lineHeight: 1.1 }}>
+        {fmtPct(info.pctFeito)}
+        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12.5, fontWeight: 600, color: "var(--muted)", marginLeft: 6 }}>feito</span>
+      </div>
+      <div style={{ margin: "10px 0 6px", height: 8, background: "#EFEBE1", borderRadius: 4, overflow: "hidden" }}>
+        <div style={{ width: `${Math.min(100, info.pctFeito)}%`, height: "100%", background: info.batida ? "var(--green)" : cor, borderRadius: 4 }} />
+      </div>
+      <div style={{ fontFamily: "Inter, sans-serif" }}>
+        <div style={linha}>
+          <span style={{ color: "var(--muted)" }}>Feito</span>
+          <span style={valorStyle}>{formatBRL(faturado)} ({fmtPct(info.pctFeito)})</span>
+        </div>
+        {info.batida ? (
+          <div style={linha}>
+            <span style={{ color: "var(--muted)" }}>Acima do alvo</span>
+            <span style={{ ...valorStyle, color: "var(--green)" }}>+{formatBRL(info.acima)}</span>
+          </div>
+        ) : (
+          <>
+            <div style={linha}>
+              <span style={{ color: "var(--muted)" }}>Falta</span>
+              <span style={{ ...valorStyle, color: "var(--rust)" }}>{formatBRL(info.falta)} ({fmtPct(info.pctFalta)})</span>
+            </div>
+            {analise.diasRestantes > 0 && (
+              <div style={linha}>
+                <span style={{ color: "var(--muted)" }}>Por dia ({analise.diasRestantes} dias, contando hoje)</span>
+                <span style={valorStyle}>{formatBRL(info.porDia)}</span>
+              </div>
+            )}
+            {info.vendas != null && (
+              <div style={{ ...linha, borderBottom: "none" }}>
+                <span style={{ color: "var(--muted)" }}>No ticket atual, equivale a</span>
+                <span style={valorStyle}>
+                  {info.vendas} venda{info.vendas === 1 ? "" : "s"}
+                  {info.pares != null ? ` · ${labelPares(info.pares)}` : ""}
+                </span>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      {info.batida && (
+        <div style={{ marginTop: 8, fontFamily: "Inter, sans-serif", fontSize: 12.5, fontWeight: 700, color: "var(--green)" }}>✅ Batida!</div>
+      )}
+    </LedgerCard>
+  );
+}
+
+function MetaPainel({ analise, alvo, mesLabel, onEditar }) {
+  if (!alvo) {
+    return (
+      <LedgerCard style={{ padding: "26px 18px", textAlign: "center", fontFamily: "Inter, sans-serif" }}>
+        <div style={{ color: "var(--muted)", fontSize: 13.5, marginBottom: 14 }}>Ainda não há meta definida para {mesLabel}.</div>
+        <button
+          onClick={onEditar}
+          style={{ padding: "10px 16px", borderRadius: 5, border: "none", cursor: "pointer", background: "var(--ink)", color: "var(--paper)", fontWeight: 600, fontSize: 13 }}
+        >
+          Definir meta de {mesLabel}
+        </button>
+      </LedgerCard>
+    );
+  }
+  const corPonto = { atencao: "var(--rust)", ok: "var(--green)", info: "var(--ink)" };
+  const iconePonto = { atencao: "⚠️", ok: "✅", info: "💡" };
+  const ritmo = [
+    ["Média por dia", formatBRL(analise.mediaDia)],
+    [analise.situacao === "atual" ? "Projeção do mês" : "Fechamento", formatBRL(analise.projecao)],
+    ["Ticket médio", formatBRL(analise.ticket)],
+    ["Valor médio por par", formatBRL(analise.porPar)],
+  ];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <LedgerCard style={{ padding: "16px 16px 14px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+          <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
+            Meta de {mesLabel}
+          </span>
+          <button
+            onClick={onEditar}
+            style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", borderRadius: 4, border: "1px solid var(--paper-line)", background: "transparent", color: "var(--ink)", fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 11.5, cursor: "pointer" }}
+          >
+            <Pencil size={12} /> Editar meta
+          </button>
+        </div>
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 26, fontWeight: 700, color: "var(--ink)", marginBottom: 10 }}>
+          {formatBRL(analise.faturado)}
+          <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12.5, fontWeight: 600, color: "var(--muted)", marginLeft: 8 }}>
+            faturado · {analise.qtdVendas} venda{analise.qtdVendas === 1 ? "" : "s"} · {labelPares(analise.pares)}
+          </span>
+        </div>
+        <BarraMeta faturado={analise.faturado} meta={alvo.meta} superMeta={alvo.superMeta} altura={16} />
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 8, fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)" }}>
+          <span><span style={{ display: "inline-block", width: 10, height: 3, background: "var(--ink)", verticalAlign: "middle", marginRight: 5 }} />Meta {formatBRL(alvo.meta)}</span>
+          <span><span style={{ display: "inline-block", width: 10, height: 3, background: "#C7A96B", verticalAlign: "middle", marginRight: 5 }} />Super meta {formatBRL(alvo.superMeta)}</span>
+          {analise.situacao === "atual" && (
+            <span>Dia {analise.diasDecorridos} de {analise.diasNoMes}</span>
+          )}
+        </div>
+      </LedgerCard>
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <MetaAlvoCard titulo="Meta" info={analise.meta} faturado={analise.faturado} analise={analise} cor="var(--ink)" />
+        <MetaAlvoCard titulo="Super meta" info={analise.superMeta} faturado={analise.faturado} analise={analise} cor="#C7A96B" />
+      </div>
+
+      <LedgerCard style={{ padding: "14px 16px" }}>
+        <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600, marginBottom: 10 }}>
+          Ritmo
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
+          {ritmo.map(([label, valor]) => (
+            <div key={label}>
+              <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", marginBottom: 3 }}>{label}</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 16, fontWeight: 700, color: "var(--ink)" }}>{valor}</div>
+            </div>
+          ))}
+        </div>
+      </LedgerCard>
+
+      <LedgerCard style={{ padding: "14px 16px" }}>
+        <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600, marginBottom: 10 }}>
+          Pontos a melhorar
+        </div>
+        {analise.pontos.length === 0 ? (
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 13, color: "var(--muted)" }}>
+            Ainda não há vendas suficientes neste mês para analisar.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {analise.pontos.map((pt, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", fontFamily: "Inter, sans-serif", fontSize: 13, lineHeight: 1.5, color: "var(--ink)", paddingLeft: 10, borderLeft: `3px solid ${corPonto[pt.tom]}` }}>
+                <span>{iconePonto[pt.tom]}</span>
+                <span>{pt.texto}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </LedgerCard>
+    </div>
+  );
+}
+
+function MetaModal({ mesLabel, initial, onSave, onClose }) {
+  const [meta, setMeta] = useState(initial?.meta != null ? String(initial.meta) : "");
+  const [superMeta, setSuperMeta] = useState(initial?.superMeta != null ? String(initial.superMeta) : "");
+  const [error, setError] = useState("");
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    const m = parseFloat(String(meta).replace(/\./g, "").replace(",", "."));
+    const sm = parseFloat(String(superMeta).replace(/\./g, "").replace(",", "."));
+    if (!m || m <= 0) {
+      setError("Informe uma meta válida.");
+      return;
+    }
+    if (!sm || sm < m) {
+      setError("A super meta precisa ser maior ou igual à meta.");
+      return;
+    }
+    onSave({ meta: m, superMeta: sm });
+  }
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(23,20,15,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
+      onClick={onClose}
+    >
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 380 }}>
+        <LedgerCard style={{ padding: 22 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>Meta de {mesLabel}</h3>
+            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
+              <X size={18} />
+            </button>
+          </div>
+          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <Field label="Meta (R$)">
+              <input type="text" inputMode="decimal" value={meta} onChange={(e) => setMeta(e.target.value)} placeholder="4000" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+            </Field>
+            <Field label="Super meta (R$)">
+              <input type="text" inputMode="decimal" value={superMeta} onChange={(e) => setSuperMeta(e.target.value)} placeholder="5000" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+            </Field>
+            {error && <div style={{ color: "var(--rust)", fontSize: 12.5, fontFamily: "Inter, sans-serif" }}>{error}</div>}
+            <button
+              type="submit"
+              style={{ marginTop: 6, padding: "11px 14px", borderRadius: 5, border: "none", cursor: "pointer", background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 13.5 }}
+            >
+              Salvar meta
+            </button>
+          </form>
+        </LedgerCard>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Ledger row list ----------
 function LedgerRow({ children, onEdit, onDelete }) {
   return (
@@ -990,6 +1427,7 @@ function PrimeStepApp() {
   const [despesas, setDespesas] = useState([]);
   const [assinaturas, setAssinaturas] = useState([]);
   const [pedidos, setPedidos] = useState([]);
+  const [metas, setMetas] = useState({}); // metas salvas no banco, por mês (AAAA-MM)
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
   const [modal, setModal] = useState(null); // {type: 'venda'|'despesa'|'assinatura'|'pedido', initial?}
@@ -998,11 +1436,12 @@ function PrimeStepApp() {
 
   useEffect(() => {
     (async () => {
-      const [v, d, a, p] = await Promise.all([loadVendas(), loadDespesas(), loadAssinaturas(), loadPedidos()]);
+      const [v, d, a, p, mt] = await Promise.all([loadVendas(), loadDespesas(), loadAssinaturas(), loadPedidos(), loadMetas()]);
       setVendas(v);
       setDespesas(d);
       setAssinaturas(a);
       setPedidos(p);
+      setMetas(mt);
       setLoading(false);
     })();
   }, []);
@@ -1145,6 +1584,17 @@ function PrimeStepApp() {
   const saldo = totalReceitas - totalDespesas;
   const pendentes = vendasMes.filter((v) => v.status === "pendente").reduce((s, v) => s + Number(v.valor || 0), 0);
   const paresMes = somaPares(vendasMes);
+
+  const alvoMes = metas[monthFilter] || METAS_PADRAO[monthFilter] || null;
+  const analiseMeta = useMemo(
+    () => (alvoMes ? analisarMeta(vendas, monthFilter, alvoMes, new Date()) : null),
+    [vendas, monthFilter, alvoMes]
+  );
+  function salvarMeta(m) {
+    setMetas((prev) => ({ ...prev, [monthFilter]: m }));
+    upsertMeta(monthFilter, m);
+    setModal(null);
+  }
 
   const chartData = useMemo(() => {
     const arr = [];
@@ -1417,6 +1867,9 @@ function PrimeStepApp() {
               <StatCard label="Pares feitos no mês" value={String(paresMes)} icon={Check} />
             </div>
 
+            {/* Meta do mês */}
+            {analiseMeta && <MetaResumoTopo analise={analiseMeta} onAbrir={() => setTab("meta")} />}
+
             {/* Chart */}
             <LedgerCard style={{ padding: "18px 16px 8px", marginBottom: 22 }}>
               <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600, marginBottom: 6, paddingLeft: 4 }}>
@@ -1442,6 +1895,7 @@ function PrimeStepApp() {
               {[
                 ["operacional", `Operacional (${pedidos.filter((p) => p.etapa !== "liberado").length})`],
                 ["vendas", `Vendas (${vendasMes.length})`],
+                ["meta", "Meta"],
                 ["despesas", `Despesas (${despesasMes.length})`],
                 ["assinaturas", `Assinaturas (${assinaturas.length})`],
                 ["calendario", "Calendário"],
@@ -1465,7 +1919,7 @@ function PrimeStepApp() {
                 </button>
               ))}
               <div style={{ flex: 1 }} />
-              {tab !== "analises" && tab !== "historico" && tab !== "calendario" && (
+              {tab !== "analises" && tab !== "historico" && tab !== "calendario" && tab !== "meta" && (
                 <button
                   onClick={() => setModal({ type: tab === "despesas" ? "despesa" : tab === "assinaturas" ? "assinatura" : tab === "operacional" ? "pedido" : "venda" })}
                   style={{
@@ -1477,6 +1931,15 @@ function PrimeStepApp() {
                 </button>
               )}
             </div>
+
+            {tab === "meta" && (
+              <MetaPainel
+                analise={analiseMeta}
+                alvo={alvoMes}
+                mesLabel={monthLabel(monthFilter)}
+                onEditar={() => setModal({ type: "meta" })}
+              />
+            )}
 
             {tab === "analises" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 4 }}>
@@ -2062,7 +2525,7 @@ function PrimeStepApp() {
             )}
 
             {/* List */}
-            {tab !== "analises" && tab !== "historico" && tab !== "assinaturas" && tab !== "operacional" && tab !== "calendario" && (
+            {tab !== "analises" && tab !== "historico" && tab !== "assinaturas" && tab !== "operacional" && tab !== "calendario" && tab !== "meta" && (
             <LedgerCard style={{ padding: "6px 14px 4px" }}>
               {tab !== "despesas" ? (
                 vendasMes.length === 0 ? (
@@ -2132,6 +2595,14 @@ function PrimeStepApp() {
         )}
       </div>
 
+      {modal && modal.type === "meta" && (
+        <MetaModal
+          mesLabel={monthLabel(monthFilter)}
+          initial={alvoMes}
+          onSave={salvarMeta}
+          onClose={() => setModal(null)}
+        />
+      )}
       {modal && modal.type === "assinatura" && (
         <AssinaturaModal
           initial={modal.initial}
@@ -2163,7 +2634,7 @@ function PrimeStepApp() {
           onClose={() => setModal(null)}
         />
       )}
-      {modal && modal.type !== "assinatura" && modal.type !== "pedido" && (
+      {modal && modal.type !== "assinatura" && modal.type !== "pedido" && modal.type !== "meta" && (
         <EntryModal
           type={modal.type}
           initial={modal.initial}
