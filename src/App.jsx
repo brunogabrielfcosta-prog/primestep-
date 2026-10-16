@@ -1849,6 +1849,140 @@ function ClientesTab({ clientes, clientesOk, vendas, onAbrir, onExcluir, onImpor
   );
 }
 
+// ---------- Recado do dia ----------
+// Junta o que pede atenção hoje: ritmo da meta, ontem, cobranças, pares em processo,
+// aniversariantes e clientes para chamar de volta. Recalculado sempre com os dados atuais.
+function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana }) {
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const hojeIso = iso(hoje);
+  const ontem = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - 1);
+  const ontemIso = iso(ontem);
+  const mesKey = hojeIso.slice(0, 7);
+  const itens = [];
+
+  const vendasHoje = vendas.filter((v) => v.data === hojeIso);
+  const totalHoje = somaValor(vendasHoje);
+
+  // 1. Meta: quanto o dia de hoje precisa
+  if (alvo) {
+    const a = analisarMeta(vendas, mesKey, alvo, hoje);
+    if (a.superMeta.batida) {
+      itens.push({ tom: "ok", texto: `Super meta do mês batida: ${formatBRL(a.faturado)}, ${formatBRL(a.superMeta.acima)} acima. Hoje: ${formatBRL(totalHoje)}.` });
+    } else {
+      const alvoAtual = a.meta.batida ? a.superMeta : a.meta;
+      const nome = a.meta.batida ? "a super meta" : "a meta";
+      const faltaAntesDeHoje = Math.max(0, alvoAtual.valor - (a.faturado - totalHoje));
+      const precisaHoje = a.diasRestantes ? faltaAntesDeHoje / a.diasRestantes : 0;
+      if (totalHoje >= precisaHoje && totalHoje > 0) {
+        itens.push({ tom: "ok", texto: `Hoje: ${formatBRL(totalHoje)}. Já passou dos ${formatBRL(precisaHoje)} que o dia precisa para ${nome}.` });
+      } else {
+        itens.push({
+          tom: "atencao",
+          texto: `Hoje: ${formatBRL(totalHoje)} de ${formatBRL(precisaHoje)} que o dia precisa para ${nome}. Faltam ${formatBRL(precisaHoje - totalHoje)}${a.ticket ? (() => { const n = Math.max(1, Math.ceil((precisaHoje - totalHoje) / a.ticket)); return `, cerca de ${n} venda${n === 1 ? "" : "s"} no seu ticket médio`; })() : ""}.`,
+        });
+      }
+    }
+  }
+
+  // 2. Ontem
+  if (ontemIso.slice(0, 7) === mesKey) {
+    const vOntem = vendas.filter((v) => v.data === ontemIso);
+    const tOntem = somaValor(vOntem);
+    itens.push({
+      tom: tOntem > 0 ? "info" : "atencao",
+      texto: tOntem > 0
+        ? `Ontem: ${formatBRL(tOntem)} em ${vOntem.length} venda${vOntem.length === 1 ? "" : "s"} (${labelPares(somaPares(vOntem))}).`
+        : "Ontem não teve venda lançada. Se teve, lance para os números ficarem certos.",
+    });
+  }
+
+  // 3. Cobranças pendentes
+  const pendentes = vendas.filter((v) => v.status === "pendente").sort((x, y) => Number(y.valor) - Number(x.valor));
+  if (pendentes.length) {
+    const nomes = pendentes.slice(0, 3).map((v) => `${v.cliente} (${formatBRL(v.valor)})`).join(", ");
+    itens.push({
+      tom: "atencao",
+      texto: `${formatBRL(somaValor(pendentes))} para receber em ${pendentes.length} venda${pendentes.length === 1 ? "" : "s"}. Cobrar: ${nomes}${pendentes.length > 3 ? " e outros" : ""}.`,
+    });
+  }
+
+  // 4. Pares em processo e prontos
+  const emProcesso = pedidos.filter((p) => p.etapa !== "liberado");
+  const prontos = pedidos.filter((p) => p.etapa === "liberado" && p.dataEntrega && diasDesde(p.dataEntrega) <= 1);
+  if (emProcesso.length || prontos.length) {
+    const partes = [];
+    if (emProcesso.length) partes.push(`${labelPares(emProcesso.length)} em processo`);
+    if (prontos.length) partes.push(`${labelPares(prontos.length)} pronto${prontos.length === 1 ? "" : "s"} para entrega (${prontos.slice(0, 3).map((p) => p.cliente).join(", ")}): avise o cliente`);
+    itens.push({ tom: prontos.length ? "atencao" : "info", texto: partes.join(" · ") + "." });
+  }
+
+  // 5. Aniversariantes
+  const mmdd = (d) => `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const proximos = [];
+  for (let i = 0; i < 7; i++) proximos.push(mmdd(new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() + i)));
+  const aniv = clientes
+    .filter((c) => c.aniversario && proximos.includes(c.aniversario.slice(5)))
+    .sort((x, y) => proximos.indexOf(x.aniversario.slice(5)) - proximos.indexOf(y.aniversario.slice(5)));
+  if (aniv.length) {
+    const hojeAniv = aniv.filter((c) => c.aniversario.slice(5) === proximos[0]);
+    itens.push({
+      tom: "info",
+      texto: hojeAniv.length
+        ? `Hoje é aniversário de ${hojeAniv.map((c) => c.nome).join(", ")}. Mande uma mensagem com um mimo ou desconto.`
+        : `Aniversários nesta semana: ${aniv.slice(0, 3).map((c) => `${c.nome} (${c.aniversario.slice(8, 10)}/${c.aniversario.slice(5, 7)})`).join(", ")}.`,
+    });
+  }
+
+  // 6. Clientes para chamar de volta (os que mais gastaram entre os sumidos)
+  const sumidos = clientes
+    .map((c) => ({ c, r: resumoCliente(vendas, c) }))
+    .filter((x) => x.r.dias != null && x.r.dias >= DIAS_SUMIDO)
+    .sort((x, y) => y.r.total - x.r.total);
+  if (sumidos.length) {
+    itens.push({
+      tom: "atencao",
+      texto: `${sumidos.length} cliente${sumidos.length === 1 ? "" : "s"} sem voltar há ${DIAS_SUMIDO}+ dias. Comece por: ${sumidos.slice(0, 3).map((x) => `${x.c.nome} (há ${x.r.dias} dias)`).join(", ")}.`,
+    });
+  }
+
+  // 7. Melhor dia da semana
+  if (melhorDiaSemana && melhorDiaSemana.total > 0 && DIAS_SEMANA[hoje.getDay()] === melhorDiaSemana.label) {
+    itens.push({ tom: "info", texto: `Hoje é ${DIAS_SEMANA_EXT[hoje.getDay()].toLowerCase()}, o dia da semana que mais vende. Bom dia para postar e responder rápido.` });
+  }
+
+  return itens;
+}
+
+function RecadoDoDia({ itens, hoje }) {
+  const [aberto, setAberto] = useState(true);
+  if (!itens.length) return null;
+  const cor = { atencao: "var(--rust)", ok: "var(--green)", info: "var(--ink)" };
+  const icone = { atencao: "⚠️", ok: "✅", info: "💡" };
+  return (
+    <LedgerCard style={{ padding: "14px 16px", marginBottom: 18 }}>
+      <button
+        onClick={() => setAberto((v) => !v)}
+        style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", width: "100%", gap: 8, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}
+      >
+        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
+          Recado do dia · {DIAS_SEMANA_EXT[hoje.getDay()]}, {formatDateBR(`${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}-${String(hoje.getDate()).padStart(2, "0")}`)}
+        </span>
+        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--muted)" }}>{aberto ? "ocultar ▴" : `mostrar (${itens.length}) ▾`}</span>
+      </button>
+      {aberto && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+          {itens.map((it, i) => (
+            <div key={i} style={{ display: "flex", gap: 9, alignItems: "flex-start", fontFamily: "Inter, sans-serif", fontSize: 13, lineHeight: 1.5, color: "var(--ink)", paddingLeft: 10, borderLeft: `3px solid ${cor[it.tom]}` }}>
+              <span>{icone[it.tom]}</span>
+              <span>{it.texto}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </LedgerCard>
+  );
+}
+
 // ---------- Ledger row list ----------
 function LedgerRow({ children, onEdit, onDelete }) {
   return (
@@ -2278,6 +2412,14 @@ function PrimeStepApp() {
   }, [vendas]);
   const melhorDiaSemana = vendasPorDiaSemana.length ? vendasPorDiaSemana.reduce((a, b) => (b.total > a.total ? b : a)) : null;
 
+  // Recado do dia: sempre sobre o mês de hoje, independente do mês escolhido no filtro.
+  const recadoDoDia = useMemo(() => {
+    const hoje = new Date();
+    const mesHoje = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}`;
+    const alvo = metas[mesHoje] || METAS_PADRAO[mesHoje] || null;
+    return montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana });
+  }, [vendas, pedidos, clientes, metas, melhorDiaSemana]);
+
   // Grade de calendário do mês selecionado, com o total vendido e os pares de cada dia.
   const calendarioSemanas = useMemo(() => {
     const [y, m] = monthFilter.split("-").map(Number);
@@ -2452,6 +2594,7 @@ function PrimeStepApp() {
 
             {/* Meta do mês */}
             {analiseMeta && <MetaResumoTopo analise={analiseMeta} onAbrir={() => setTab("meta")} />}
+            <RecadoDoDia itens={recadoDoDia} hoje={new Date()} />
 
             {/* Chart */}
             <LedgerCard style={{ padding: "18px 16px 8px", marginBottom: 22 }}>
