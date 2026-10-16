@@ -1739,12 +1739,26 @@ function PrimeStepApp() {
     return semanas;
   }, [vendas, monthFilter]);
 
+  // Resumo de cada semana do mês (semanas de domingo a sábado, como no calendário).
   const resumoSemanas = useMemo(() => {
-    return calendarioSemanas.map((semana, idx) => ({
-      numero: idx + 1,
-      total: semana.reduce((s, c) => s + (c ? c.total : 0), 0),
-    }));
-  }, [calendarioSemanas]);
+    const [y, m] = monthFilter.split("-").map(Number);
+    const diasNoMes = new Date(y, m, 0).getDate();
+    return calendarioSemanas.map((semana, idx) => {
+      const dias = semana.filter(Boolean);
+      const total = dias.reduce((s, c) => s + c.total, 0);
+      return {
+        numero: idx + 1,
+        inicio: dias.length ? dias[0].dia : null,
+        fim: dias.length ? dias[dias.length - 1].dia : null,
+        qtdDias: dias.length,
+        total,
+        qtd: dias.reduce((s, c) => s + c.qtd, 0),
+        pares: dias.reduce((s, c) => s + c.pares, 0),
+        // Parte da meta do mês que cabe nesta semana, proporcional aos dias dela.
+        metaSemana: alvoMes ? (alvoMes.meta * dias.length) / diasNoMes : null,
+      };
+    });
+  }, [calendarioSemanas, monthFilter, alvoMes]);
   const melhorSemanaMes = resumoSemanas.length ? resumoSemanas.reduce((a, b) => (b.total > a.total ? b : a)) : null;
   const maxDiaValor = Math.max(1, ...calendarioSemanas.flat().filter(Boolean).map((c) => c.total));
 
@@ -2255,6 +2269,71 @@ function PrimeStepApp() {
                   {melhorSemanaMes && melhorSemanaMes.total > 0 && (
                     <div style={{ marginTop: 10, fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--green)", fontWeight: 600 }}>
                       🏆 Melhor semana do mês: semana {melhorSemanaMes.numero} — {formatBRL(melhorSemanaMes.total)}
+                    </div>
+                  )}
+                </LedgerCard>
+
+                {/* Faturamento semana a semana */}
+                <LedgerCard style={{ padding: "16px 16px 14px" }}>
+                  <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
+                    Faturamento por semana — {monthLabel(monthFilter)}
+                  </span>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+                    {resumoSemanas.map((sem, i) => {
+                      const maxSemana = Math.max(1, ...resumoSemanas.map((x) => x.total));
+                      const totalMesSemanas = resumoSemanas.reduce((s, x) => s + x.total, 0);
+                      const anterior = i > 0 ? resumoSemanas[i - 1] : null;
+                      const variacao = anterior && anterior.total > 0 ? (sem.total / anterior.total - 1) * 100 : null;
+                      const isMelhor = melhorSemanaMes && sem.numero === melhorSemanaMes.numero && sem.total > 0;
+                      const pctMeta = sem.metaSemana ? (sem.total / sem.metaSemana) * 100 : null;
+                      const mm = monthFilter.slice(5, 7);
+                      const ehMesAtual = monthFilter === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+                      const futura = ehMesAtual && sem.inicio > now.getDate();
+                      const emAndamento = ehMesAtual && !futura && sem.fim >= now.getDate();
+                      return (
+                        <div key={sem.numero} style={{ fontFamily: "Inter, sans-serif", paddingBottom: 10, borderBottom: i < resumoSemanas.length - 1 ? "1px solid var(--paper-line)" : "none" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 5 }}>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>
+                              Semana {sem.numero} {isMelhor ? "🏆" : ""}
+                              {emAndamento && <span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--muted)", marginLeft: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>em andamento</span>}
+                              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, fontWeight: 500, color: "var(--muted)", marginLeft: 8 }}>
+                                {String(sem.inicio).padStart(2, "0")}/{mm} a {String(sem.fim).padStart(2, "0")}/{mm}
+                              </span>
+                            </span>
+                            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 700, color: sem.total > 0 ? "var(--green)" : "var(--muted)" }}>
+                              {formatBRL(sem.total)}
+                            </span>
+                          </div>
+                          <div style={{ height: 10, background: "#EFEBE1", borderRadius: 4, overflow: "hidden", marginBottom: 6 }}>
+                            <div style={{ width: `${(sem.total / maxSemana) * 100}%`, height: "100%", background: isMelhor ? "var(--green)" : "var(--ink)", borderRadius: 4 }} />
+                          </div>
+                          {futura ? (
+                            <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                              Ainda não começou{sem.metaSemana ? ` · meta da semana: ${formatBRL(sem.metaSemana)}` : ""}
+                            </div>
+                          ) : (
+                          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11.5, color: "var(--muted)" }}>
+                            <span>{sem.qtd} venda{sem.qtd === 1 ? "" : "s"} · {labelPares(sem.pares)}</span>
+                            <span>{totalMesSemanas ? fmtPct((sem.total / totalMesSemanas) * 100) : "0%"} do mês</span>
+                            {variacao !== null && (
+                              <span style={{ color: variacao >= 0 ? "var(--green)" : "var(--rust)", fontWeight: 600 }}>
+                                {fmtVar(variacao)} vs semana {sem.numero - 1}
+                              </span>
+                            )}
+                            {pctMeta !== null && (
+                              <span style={{ color: pctMeta >= 100 ? "var(--green)" : "var(--ink)", fontWeight: 600 }}>
+                                {fmtPct(pctMeta)} da meta da semana ({formatBRL(sem.metaSemana)})
+                              </span>
+                            )}
+                          </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {alvoMes && (
+                    <div style={{ marginTop: 10, fontFamily: "Inter, sans-serif", fontSize: 11, color: "var(--muted)" }}>
+                      Meta da semana = meta do mês dividida pelos dias, proporcional aos dias de cada semana.
                     </div>
                   )}
                 </LedgerCard>
