@@ -10,6 +10,22 @@ const SUPABASE_URL = "https://gwqbzquvjodwtzebbxra.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3cWJ6cXV2am9kd3R6ZWJieHJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxOTI4NDAsImV4cCI6MjEwMzc2ODg0MH0.6bUPgnOO0SxmW0ilhZK85KFO2vls5QkCxg-BLRt-vMs";
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// Mostra na tela quando algo não foi salvo (antes, o erro ficava escondido).
+let ultimoAvisoErro = 0;
+export function avisarErro(acao, error) {
+  console.error(acao, error);
+  const agora = Date.now();
+  if (agora - ultimoAvisoErro < 4000) return; // evita vários avisos seguidos
+  ultimoAvisoErro = agora;
+  const semPermissao =
+    error && (error.code === "42501" || error.status === 401 || /row-level security|permission|jwt/i.test(error.message || ""));
+  window.alert(
+    semPermissao
+      ? `Não foi possível ${acao}: sua sessão expirou ou este usuário não tem acesso. Saia e entre de novo no sistema.`
+      : `Não foi possível ${acao}. Confira a internet e tente de novo. Se continuar, recarregue a página antes de lançar outra coisa.`
+  );
+}
+
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');`;
 
 const CATALOGO_SERVICOS = [
@@ -166,7 +182,7 @@ function rowToPedido(row) {
 async function loadVendas() {
   const { data, error } = await supabase.from("vendas").select("*").order("data", { ascending: false });
   if (error) {
-    console.error("Erro ao carregar vendas", error);
+    avisarErro("carregar as vendas", error);
     return [];
   }
   return (data || []).map(rowToVenda);
@@ -174,7 +190,7 @@ async function loadVendas() {
 async function loadDespesas() {
   const { data, error } = await supabase.from("despesas").select("*").order("data", { ascending: false });
   if (error) {
-    console.error("Erro ao carregar despesas", error);
+    avisarErro("carregar as despesas", error);
     return [];
   }
   return (data || []).map(rowToDespesa);
@@ -182,7 +198,7 @@ async function loadDespesas() {
 async function loadAssinaturas() {
   const { data, error } = await supabase.from("assinaturas").select("*").order("cliente", { ascending: true });
   if (error) {
-    console.error("Erro ao carregar assinaturas", error);
+    avisarErro("carregar as assinaturas", error);
     return [];
   }
   return (data || []).map(rowToAssinatura);
@@ -190,7 +206,7 @@ async function loadAssinaturas() {
 async function loadPedidos() {
   const { data, error } = await supabase.from("pedidos").select("*").order("data_entrada", { ascending: false });
   if (error) {
-    console.error("Erro ao carregar pedidos", error);
+    avisarErro("carregar os pares em processo", error);
     return [];
   }
   return (data || []).map(rowToPedido);
@@ -199,6 +215,7 @@ async function loadPedidos() {
 async function loadMetas() {
   const { data, error } = await supabase.from("metas").select("*");
   if (error) {
+    // Sem a tabela de metas, o sistema usa as metas definidas no código.
     console.warn("Tabela de metas indisponível; usando as metas definidas no código.", error);
     return {};
   }
@@ -210,12 +227,7 @@ async function loadMetas() {
 }
 async function upsertMeta(mes, m) {
   const { error } = await supabase.from("metas").upsert({ mes, meta: m.meta, super_meta: m.superMeta });
-  if (error) {
-    console.error("Erro ao salvar meta", error);
-    window.alert(
-      "A meta mudou só nesta tela e volta ao valor anterior quando a página for recarregada: falta criar a tabela \"metas\" no Supabase."
-    );
-  }
+  if (error) avisarErro("salvar a meta", error);
 }
 
 let avisoColunasMostrado = false;
@@ -243,46 +255,46 @@ async function upsertVenda(v) {
       }
       return;
     }
-    console.error("Erro ao salvar venda", retry.error);
+    avisarErro("salvar a venda", retry.error);
     return;
   }
-  console.error("Erro ao salvar venda", error);
+  avisarErro("salvar a venda", error);
 }
 async function deleteVendaRow(id) {
   const { error } = await supabase.from("vendas").delete().eq("id", id);
-  if (error) console.error("Erro ao excluir venda", error);
+  if (error) avisarErro("excluir a venda", error);
 }
 async function upsertDespesa(d) {
   const { error } = await supabase.from("despesas").upsert({
     id: d.id, data: d.data, descricao: d.descricao, categoria: d.categoria, valor: d.valor,
   });
-  if (error) console.error("Erro ao salvar despesa", error);
+  if (error) avisarErro("salvar a despesa", error);
 }
 async function deleteDespesaRow(id) {
   const { error } = await supabase.from("despesas").delete().eq("id", id);
-  if (error) console.error("Erro ao excluir despesa", error);
+  if (error) avisarErro("excluir a despesa", error);
 }
 async function upsertAssinatura(a) {
   const { error } = await supabase.from("assinaturas").upsert({
     id: a.id, cliente: a.cliente, plano_id: a.planoId, plano_nome: a.planoNome,
     valor_mensal: a.valorMensal, dia_cobranca: a.diaCobranca, data_inicio: a.dataInicio, status: a.status,
   });
-  if (error) console.error("Erro ao salvar assinatura", error);
+  if (error) avisarErro("salvar a assinatura", error);
 }
 async function deleteAssinaturaRow(id) {
   const { error } = await supabase.from("assinaturas").delete().eq("id", id);
-  if (error) console.error("Erro ao excluir assinatura", error);
+  if (error) avisarErro("excluir a assinatura", error);
 }
 async function upsertPedido(p) {
   const { error } = await supabase.from("pedidos").upsert({
     id: p.id, cliente: p.cliente, tenis: p.tenis, data_entrada: p.dataEntrada,
     etapa: p.etapa, observacoes: p.observacoes, data_entrega: p.dataEntrega || null,
   });
-  if (error) console.error("Erro ao salvar pedido", error);
+  if (error) avisarErro("salvar o par em processo", error);
 }
 async function deletePedidoRow(id) {
   const { error } = await supabase.from("pedidos").delete().eq("id", id);
-  if (error) console.error("Erro ao excluir pedido", error);
+  if (error) avisarErro("excluir o par em processo", error);
 }
 
 // ---------- Small UI atoms ----------
@@ -1471,7 +1483,7 @@ function PrimeStepApp() {
   const [importMsg, setImportMsg] = useState("");
 
   function handleExport() {
-    const payload = { app: "primestep-controle-financeiro", exportadoEm: new Date().toISOString(), vendas, despesas, assinaturas };
+    const payload = { app: "primestep-controle-financeiro", exportadoEm: new Date().toISOString(), vendas, despesas, assinaturas, pedidos, metas };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1493,9 +1505,12 @@ function PrimeStepApp() {
         const v = Array.isArray(parsed.vendas) ? parsed.vendas : null;
         const d = Array.isArray(parsed.despesas) ? parsed.despesas : null;
         const a = Array.isArray(parsed.assinaturas) ? parsed.assinaturas : [];
+        // Backups antigos não têm pares em processo nem metas: nesse caso, eles ficam como estão.
+        const pd = Array.isArray(parsed.pedidos) ? parsed.pedidos : null;
+        const mt = parsed.metas && typeof parsed.metas === "object" && !Array.isArray(parsed.metas) ? parsed.metas : null;
         if (!v || !d) throw new Error("formato inválido");
         const ok = window.confirm(
-          `Este backup tem ${v.length} venda(s), ${d.length} despesa(s) e ${a.length} assinatura(s).\nIsso vai SUBSTITUIR os dados atuais (${vendas.length} venda(s), ${despesas.length} despesa(s), ${assinaturas.length} assinatura(s)). Continuar?`
+          `Este backup tem ${v.length} venda(s), ${d.length} despesa(s), ${a.length} assinatura(s)${pd ? ` e ${pd.length} par(es) em processo` : ""}.\nIsso vai SUBSTITUIR os dados atuais (${vendas.length} venda(s), ${despesas.length} despesa(s), ${assinaturas.length} assinatura(s)${pd ? `, ${pedidos.length} par(es) em processo` : ""}). Continuar?`
         );
         if (!ok) return;
         // Apaga tudo que existe hoje e grava o backup inteiro no banco.
@@ -1505,6 +1520,15 @@ function PrimeStepApp() {
         await Promise.all(v.map((item) => upsertVenda(item)));
         await Promise.all(d.map((item) => upsertDespesa(item)));
         await Promise.all(a.map((item) => upsertAssinatura(item)));
+        if (pd) {
+          await Promise.all(pedidos.map((old) => deletePedidoRow(old.id)));
+          await Promise.all(pd.map((item) => upsertPedido(item)));
+          setPedidos(pd);
+        }
+        if (mt) {
+          await Promise.all(Object.entries(mt).map(([mes, m]) => upsertMeta(mes, m)));
+          setMetas(mt);
+        }
         setVendas(v);
         setDespesas(d);
         setAssinaturas(a);
@@ -1839,7 +1863,7 @@ function PrimeStepApp() {
               ))}
             </select>
           </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+          <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap", alignItems: "center" }}>
             <button
               onClick={handleExport}
               title="Baixar backup de todos os dados"
@@ -1862,6 +1886,17 @@ function PrimeStepApp() {
               <Upload size={13} /> Restaurar backup
               <input type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
             </label>
+            <button
+              onClick={() => supabase.auth.signOut()}
+              title="Sair do sistema"
+              style={{
+                display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 4, marginLeft: "auto",
+                border: "1px solid var(--paper-line)", background: "transparent", color: "var(--muted)",
+                fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 12, cursor: "pointer",
+              }}
+            >
+              Sair
+            </button>
             {importMsg && (
               <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--muted)", alignSelf: "center" }}>{importMsg}</span>
             )}
@@ -2725,10 +2760,88 @@ function PrimeStepApp() {
   );
 }
 
+// ---------- Login ----------
+const ESTILO_LOGIN = `
+  ${FONT_IMPORT}
+  :root { --bg: #E7E3DB; --paper: #FBFAF7; --paper-line: #D6D1C4; --ink: #17140F; --rust: #A24632; --muted: #8A8375; }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+`;
+
+function TelaCarregando() {
+  return (
+    <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Inter, sans-serif", color: "var(--muted)" }}>
+      <style>{ESTILO_LOGIN}</style>
+      Carregando…
+    </div>
+  );
+}
+
+function TelaLogin() {
+  const [email, setEmail] = useState("");
+  const [senha, setSenha] = useState("");
+  const [erro, setErro] = useState("");
+  const [entrando, setEntrando] = useState(false);
+
+  async function entrar(e) {
+    e.preventDefault();
+    setErro("");
+    if (!email.trim() || !senha) {
+      setErro("Informe o e-mail e a senha.");
+      return;
+    }
+    setEntrando(true);
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: senha });
+    setEntrando(false);
+    if (error) {
+      setErro(/invalid/i.test(error.message || "") ? "E-mail ou senha incorretos." : "Não foi possível entrar. Confira a internet e tente de novo.");
+    }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <style>{ESTILO_LOGIN}</style>
+      <form onSubmit={entrar} style={{ width: "100%", maxWidth: 360, background: "var(--paper)", border: "1px solid var(--paper-line)", borderRadius: 4, padding: 24, display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ marginBottom: 4 }}>
+          <div style={{ fontFamily: "Manrope, sans-serif", fontSize: 28, fontWeight: 800, color: "var(--ink)", letterSpacing: "-0.02em", lineHeight: 1 }}>
+            prime<span style={{ fontWeight: 500 }}>step</span>
+          </div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10.5, letterSpacing: "0.22em", color: "var(--muted)", fontWeight: 600, marginTop: 6 }}>
+            CONTROLE FINANCEIRO
+          </div>
+        </div>
+        <Field label="E-mail">
+          <input id="login-email" type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
+        </Field>
+        <Field label="Senha">
+          <input id="login-senha" type="password" autoComplete="current-password" value={senha} onChange={(e) => setSenha(e.target.value)} style={inputStyle} />
+        </Field>
+        {erro && <div style={{ color: "var(--rust)", fontSize: 12.5, fontFamily: "Inter, sans-serif" }}>{erro}</div>}
+        <button
+          type="submit"
+          disabled={entrando}
+          style={{ padding: "11px 14px", borderRadius: 5, border: "none", cursor: entrando ? "default" : "pointer", background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 13.5, opacity: entrando ? 0.7 : 1 }}
+        >
+          {entrando ? "Entrando…" : "Entrar"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 // Decide qual sistema mostrar: o Prime Step normalmente, ou o controle pessoal
 // quando o endereço termina em #pessoal (ex.: seusite.vercel.app/#pessoal).
+// Os dois só abrem depois do login.
 export default function App() {
   const [rota, setRota] = useState(() => window.location.hash);
+  const [sessao, setSessao] = useState(undefined); // undefined = ainda verificando
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSessao(data.session || null));
+    const { data } = supabase.auth.onAuthStateChange((_evento, s) => setSessao(s || null));
+    return () => data.subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     function aoMudarHash() {
@@ -2738,6 +2851,8 @@ export default function App() {
     return () => window.removeEventListener("hashchange", aoMudarHash);
   }, []);
 
+  if (sessao === undefined) return <TelaCarregando />;
+  if (!sessao) return <TelaLogin />;
   if (rota === "#pessoal") return <ControlePessoal />;
   return <PrimeStepApp />;
 }

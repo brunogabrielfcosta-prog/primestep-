@@ -3,7 +3,7 @@ import {
   Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, Wallet, Lock,
   Search, ChevronLeft, ChevronRight, Package, Users, BarChart3, LogOut, Smartphone,
 } from "lucide-react";
-import { supabase } from "./App.jsx";
+import { supabase, avisarErro } from "./App.jsx";
 
 // Fornecedores sugeridos (reaproveitados do sistema da Astrotech). O campo
 // continua sendo texto livre — isso aqui é só sugestão de autocompletar.
@@ -57,18 +57,18 @@ function rowToVenda(row) {
 async function loadTabela(nome, mapper, orderBy = "data") {
   const { data, error } = await supabase.from(nome).select("*").order(orderBy, { ascending: false });
   if (error) {
-    console.error(`Erro ao carregar ${nome}`, error);
+    avisarErro(`carregar os dados (${nome})`, error);
     return [];
   }
   return (data || []).map(mapper);
 }
 async function upsertLinha(nome, payload) {
   const { error } = await supabase.from(nome).upsert(payload);
-  if (error) console.error(`Erro ao salvar em ${nome}`, error);
+  if (error) avisarErro(`salvar (${nome})`, error);
 }
 async function deleteLinha(nome, id) {
   const { error } = await supabase.from(nome).delete().eq("id", id);
-  if (error) console.error(`Erro ao excluir de ${nome}`, error);
+  if (error) avisarErro(`excluir (${nome})`, error);
 }
 
 // ---------- UI atoms ----------
