@@ -435,8 +435,20 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
   const [status, setStatus] = useState(initial?.status || "pago");
   const [valor, setValor] = useState(initial?.valor != null ? String(initial.valor) : "");
   const [origem, setOrigem] = useState(initial?.origem || "");
-  const [clienteId, setClienteId] = useState(initial?.clienteId || null);
-  const [telefoneNovo, setTelefoneNovo] = useState("");
+  // Cliente da venda: ligado à ficha (pelo id ou, nas vendas antigas, pelo nome igual).
+  const [clienteId, setClienteId] = useState(() => {
+    if (!isVenda) return null;
+    if (initial?.clienteId) return initial.clienteId;
+    const n = normalizarNome(initial?.cliente);
+    return (n && clientes.find((c) => normalizarNome(c.nome) === n)?.id) || null;
+  });
+  const dadosDe = (c) => ({
+    telefone: c?.telefone || "", instagram: c?.instagram || "", bairro: c?.bairro || "",
+    endereco: c?.endereco || "", aniversario: c?.aniversario || "", observacoes: c?.observacoes || "",
+  });
+  const [dadosCliente, setDadosCliente] = useState(() => dadosDe(clientes.find((c) => c.id === clienteId)));
+  const [mostrarDadosCliente, setMostrarDadosCliente] = useState(true);
+  const setDado = (campo) => (e) => setDadosCliente((d) => ({ ...d, [campo]: e.target.value }));
   // Pares: enquanto você não mexer no campo, ele acompanha a sugestão calculada pelos serviços.
   const [pares, setPares] = useState(initial?.pares != null ? Number(initial.pares) : 0);
   const [paresManual, setParesManual] = useState(initial?.pares != null);
@@ -473,11 +485,22 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
   const termoBusca = normalizarNome(nome);
   const sugestoesCliente =
     isVenda && !clienteId && termoBusca ? clientes.filter((c) => normalizarNome(c.nome).includes(termoBusca)).slice(0, 5) : [];
-  const nomeJaCadastrado = isVenda && !clienteId && clientes.some((c) => normalizarNome(c.nome) === termoBusca);
   function escolherCliente(c) {
     setNome(c.nome);
     setClienteId(c.id);
+    setDadosCliente(dadosDe(c));
     if (!origem && c.origem) setOrigem(c.origem);
+  }
+  function digitarNomeCliente(valor) {
+    setNome(valor);
+    // Nome igual ao de um cliente cadastrado: já liga à ficha dele.
+    const igual = clientes.find((c) => normalizarNome(c.nome) === normalizarNome(valor));
+    if (igual) {
+      escolherCliente({ ...igual, nome: valor });
+    } else if (clienteId) {
+      setClienteId(null);
+      setDadosCliente(dadosDe(null));
+    }
   }
 
   function updateItem(itemId, patch) {
@@ -529,7 +552,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
       onSave({
         id: initial?.id || uid(), data, cliente: nome.trim(), status, itens: itensClean, valor: totalClean,
         origem: origem || null, pares: paresValor,
-        clienteId: clienteId || null, telefoneNovo: telefoneNovo.trim(),
+        clienteId: clienteId || null, dadosCliente,
         assinaturaId: initial?.assinaturaId || null, mesReferencia: initial?.mesReferencia || null,
       });
     } else {
@@ -568,10 +591,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
               <input
                 type="text"
                 value={nome}
-                onChange={(e) => {
-                  setNome(e.target.value);
-                  if (isVenda) setClienteId(null);
-                }}
+                onChange={(e) => (isVenda ? digitarNomeCliente(e.target.value) : setNome(e.target.value))}
                 placeholder={isVenda ? "Digite o nome para buscar ou cadastrar" : "Ex.: Conta de energia"}
                 style={inputStyle}
               />
@@ -595,22 +615,43 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                 ))}
               </div>
             )}
-            {isVenda && clienteSelecionado && (
-              <div style={{ marginTop: -6, fontSize: 11.5, color: "var(--green)", fontFamily: "Inter, sans-serif", fontWeight: 600 }}>
-                ✓ Cliente cadastrado{clienteSelecionado.telefone ? ` · ${formatTelefone(clienteSelecionado.telefone)}` : ""}
+            {isVenda && podeCadastrarCliente && nome.trim() && (
+              <div style={{ border: "1px solid var(--paper-line)", borderRadius: 5, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => setMostrarDadosCliente((v) => !v)}
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "Inter, sans-serif", textAlign: "left" }}
+                >
+                  <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: clienteSelecionado ? "var(--green)" : "var(--ink)" }}>
+                    {clienteSelecionado ? "✓ Ficha do cliente (atualiza ao salvar)" : "Cadastro do cliente novo"}
+                  </span>
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>{mostrarDadosCliente ? "ocultar ▴" : "mostrar ▾"}</span>
+                </button>
+                {mostrarDadosCliente && (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                      <Field label="WhatsApp">
+                        <input id="venda-cli-telefone" type="tel" inputMode="tel" value={dadosCliente.telefone} onChange={setDado("telefone")} placeholder="(65) 99999-9999" style={inputStyle} />
+                      </Field>
+                      <Field label="Instagram">
+                        <input id="venda-cli-instagram" type="text" value={dadosCliente.instagram} onChange={setDado("instagram")} placeholder="@usuario" style={inputStyle} />
+                      </Field>
+                      <Field label="Bairro">
+                        <input id="venda-cli-bairro" type="text" value={dadosCliente.bairro} onChange={setDado("bairro")} placeholder="Bairro" style={inputStyle} />
+                      </Field>
+                      <Field label="Aniversário">
+                        <input id="venda-cli-aniversario" type="date" value={dadosCliente.aniversario} onChange={setDado("aniversario")} style={inputStyle} />
+                      </Field>
+                    </div>
+                    <Field label="Endereço (para busca e entrega)">
+                      <input id="venda-cli-endereco" type="text" value={dadosCliente.endereco} onChange={setDado("endereco")} placeholder="Rua, número, complemento" style={inputStyle} />
+                    </Field>
+                    <Field label="Observações do cliente">
+                      <input id="venda-cli-observacoes" type="text" value={dadosCliente.observacoes} onChange={setDado("observacoes")} placeholder="Preferências, combinados…" style={inputStyle} />
+                    </Field>
+                  </>
+                )}
               </div>
-            )}
-            {isVenda && podeCadastrarCliente && !clienteId && nome.trim() && !nomeJaCadastrado && (
-              <Field label="WhatsApp do cliente novo (opcional)">
-                <input
-                  type="tel"
-                  inputMode="tel"
-                  value={telefoneNovo}
-                  onChange={(e) => setTelefoneNovo(e.target.value)}
-                  placeholder="(65) 99999-9999"
-                  style={inputStyle}
-                />
-              </Field>
             )}
 
             {isVenda && (
@@ -1964,15 +2005,25 @@ function PrimeStepApp() {
     let entry = entrada;
     if (modal.type === "venda") {
       // Liga a venda à ficha do cliente; se for um cliente novo, cria a ficha na hora.
-      const { telefoneNovo, ...venda } = entrada;
-      if (clientesOk && !venda.assinaturaId && !venda.clienteId) {
-        const existente = clientes.find((c) => normalizarNome(c.nome) === normalizarNome(venda.cliente));
+      const { dadosCliente, ...venda } = entrada;
+      if (clientesOk && !venda.assinaturaId) {
+        const dados = dadosCliente
+          ? { ...dadosCliente, instagram: (dadosCliente.instagram || "").trim().replace(/^@/, "") }
+          : null;
+        const existente =
+          clientes.find((c) => c.id === venda.clienteId) ||
+          clientes.find((c) => normalizarNome(c.nome) === normalizarNome(venda.cliente));
         if (existente) {
           venda.clienteId = existente.id;
+          const atualizado = { ...existente, ...(dados || {}), origem: existente.origem || venda.origem || "" };
+          const mudou = Object.keys(atualizado).some((k) => (atualizado[k] || "") !== (existente[k] || ""));
+          if (mudou) {
+            persistClientes(clientes.map((c) => (c.id === existente.id ? atualizado : c)), { type: "upsert", item: atualizado });
+          }
         } else {
           const novo = {
-            id: uid(), nome: venda.cliente, telefone: telefoneNovo || "", instagram: "", bairro: "", endereco: "",
-            aniversario: "", origem: venda.origem || "", observacoes: "", criadoEm: venda.data,
+            id: uid(), nome: venda.cliente, telefone: "", instagram: "", bairro: "", endereco: "",
+            aniversario: "", observacoes: "", ...(dados || {}), origem: venda.origem || "", criadoEm: venda.data,
           };
           persistClientes([...clientes, novo].sort(porNome), { type: "upsert", item: novo });
           venda.clienteId = novo.id;
