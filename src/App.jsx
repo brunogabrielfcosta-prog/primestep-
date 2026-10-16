@@ -150,6 +150,49 @@ function labelPares(n) {
   return `${n} par${n === 1 ? "" : "es"}`;
 }
 
+// ---------- Clientes ----------
+// Compara nomes sem diferenciar acento, maiúscula e espaços extras.
+function normalizarNome(n) {
+  return (n || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+function linkWhatsApp(tel) {
+  let d = (tel || "").replace(/\D/g, "");
+  if (!d) return null;
+  if (d.length <= 11) d = "55" + d;
+  return `https://wa.me/${d}`;
+}
+function formatTelefone(t) {
+  const d = (t || "").replace(/\D/g, "");
+  if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  return t || "";
+}
+// Vendas de um cliente: as ligadas à ficha e as antigas com o mesmo nome.
+function vendasDoCliente(vendas, c) {
+  const n = normalizarNome(c.nome);
+  return vendas.filter((v) => v.clienteId === c.id || (!v.clienteId && normalizarNome(v.cliente) === n));
+}
+function diasDesde(iso) {
+  if (!iso) return null;
+  const [y, m, d] = iso.split("-").map(Number);
+  const hoje = new Date();
+  hoje.setHours(0, 0, 0, 0);
+  return Math.round((hoje.getTime() - new Date(y, m - 1, d).getTime()) / 86400000);
+}
+function resumoCliente(vendas, c) {
+  const vs = vendasDoCliente(vendas, c);
+  const datas = vs.map((v) => v.data).filter(Boolean).sort();
+  const total = vs.reduce((s, v) => s + Number(v.valor || 0), 0);
+  const ultima = datas.length ? datas[datas.length - 1] : null;
+  return {
+    vendas: vs, qtd: vs.length, total, pares: somaPares(vs),
+    ticket: vs.length ? total / vs.length : 0,
+    primeira: datas.length ? datas[0] : null, ultima, dias: diasDesde(ultima),
+  };
+}
+const porNome = (a, b) => normalizarNome(a.nome).localeCompare(normalizarNome(b.nome));
+const DIAS_SUMIDO = 60;
+
 function contarClientes(lista) {
   return new Set(lista.map((v) => (v.cliente || "").trim().toLowerCase())).size;
 }
@@ -161,7 +204,36 @@ function rowToVenda(row) {
     id: row.id, data: row.data, cliente: row.cliente, status: row.status, itens: row.itens || [], valor: Number(row.valor),
     assinaturaId: row.assinatura_id || null, mesReferencia: row.mes_referencia || null,
     origem: row.origem || null, pares: row.pares != null ? Number(row.pares) : null,
+    clienteId: row.cliente_id || null,
   };
+}
+function rowToCliente(r) {
+  return {
+    id: r.id, nome: r.nome, telefone: r.telefone || "", instagram: r.instagram || "", bairro: r.bairro || "",
+    endereco: r.endereco || "", aniversario: r.aniversario || "", origem: r.origem || "",
+    observacoes: r.observacoes || "", criadoEm: r.criado_em || null,
+  };
+}
+// Sem a tabela de clientes no banco, devolve null e a aba Clientes avisa o que falta.
+async function loadClientes() {
+  const { data, error } = await supabase.from("clientes").select("*").order("nome", { ascending: true });
+  if (error) {
+    console.warn("Tabela de clientes indisponível.", error);
+    return null;
+  }
+  return (data || []).map(rowToCliente);
+}
+async function upsertCliente(c) {
+  const { error } = await supabase.from("clientes").upsert({
+    id: c.id, nome: c.nome, telefone: c.telefone || null, instagram: c.instagram || null, bairro: c.bairro || null,
+    endereco: c.endereco || null, aniversario: c.aniversario || null, origem: c.origem || null,
+    observacoes: c.observacoes || null, criado_em: c.criadoEm || todayStr(),
+  });
+  if (error) avisarErro("salvar o cliente", error);
+}
+async function deleteClienteRow(id) {
+  const { error } = await supabase.from("clientes").delete().eq("id", id);
+  if (error) avisarErro("excluir o cliente", error);
 }
 function rowToDespesa(row) {
   return { id: row.id, data: row.data, descricao: row.descricao, categoria: row.categoria, valor: Number(row.valor) };
@@ -236,29 +308,28 @@ async function upsertVenda(v) {
     id: v.id, data: v.data, cliente: v.cliente, status: v.status, itens: v.itens, valor: v.valor,
     assinatura_id: v.assinaturaId || null, mes_referencia: v.mesReferencia || null,
   };
-  const { error } = await supabase.from("vendas").upsert({
-    ...base, origem: v.origem || null, pares: v.pares != null ? v.pares : null,
-  });
-  if (!error) return;
-
-  // Se as colunas "origem" e "pares" ainda não foram criadas no Supabase, salva a venda
-  // sem elas (para não perder o lançamento) e avisa uma vez.
-  const faltamColunas = error.code === "PGRST204" || /origem|pares/i.test(error.message || "");
-  if (faltamColunas) {
-    const retry = await supabase.from("vendas").upsert(base);
-    if (!retry.error) {
-      if (!avisoColunasMostrado) {
+  const comOrigem = { ...base, origem: v.origem || null, pares: v.pares != null ? v.pares : null };
+  const completo = { ...comOrigem, cliente_id: v.clienteId || null };
+  // Tenta salvar tudo. Se alguma coluna nova ainda não existir no banco, salva sem ela
+  // (para não perder a venda) e avisa uma vez.
+  for (const payload of [completo, comOrigem, base]) {
+    const { error } = await supabase.from("vendas").upsert(payload);
+    if (!error) {
+      if (payload !== completo && !avisoColunasMostrado) {
         avisoColunasMostrado = true;
         window.alert(
-          "A venda foi salva, mas a ORIGEM e os PARES não foram gravados: faltam as colunas \"origem\" e \"pares\" na tabela de vendas do Supabase. Crie as colunas e lance de novo."
+          "A venda foi salva, mas parte das informações novas (ficha do cliente, origem ou pares) não foi gravada: falta rodar o último comando SQL no Supabase."
         );
       }
       return;
     }
-    avisarErro("salvar a venda", retry.error);
-    return;
+    const faltaColuna = error.code === "PGRST204" || /column/i.test(error.message || "");
+    if (!faltaColuna) {
+      avisarErro("salvar a venda", error);
+      return;
+    }
   }
-  avisarErro("salvar a venda", error);
+  avisarErro("salvar a venda", { message: "colunas ausentes na tabela de vendas" });
 }
 async function deleteVendaRow(id) {
   const { error } = await supabase.from("vendas").delete().eq("id", id);
@@ -356,7 +427,7 @@ function novoItemServico() {
   return { itemId: uid(), sel: CATALOGO_SERVICOS[0].nome, servico: CATALOGO_SERVICOS[0].nome, precoUnit: String(CATALOGO_SERVICOS[0].valor), quantidade: 1 };
 }
 
-function EntryModal({ type, initial, onSave, onClose }) {
+function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastrarCliente = false }) {
   const isVenda = type === "venda";
   const [data, setData] = useState(initial?.data || todayStr());
   const [nome, setNome] = useState(isVenda ? initial?.cliente || "" : initial?.descricao || "");
@@ -364,6 +435,8 @@ function EntryModal({ type, initial, onSave, onClose }) {
   const [status, setStatus] = useState(initial?.status || "pago");
   const [valor, setValor] = useState(initial?.valor != null ? String(initial.valor) : "");
   const [origem, setOrigem] = useState(initial?.origem || "");
+  const [clienteId, setClienteId] = useState(initial?.clienteId || null);
+  const [telefoneNovo, setTelefoneNovo] = useState("");
   // Pares: enquanto você não mexer no campo, ele acompanha a sugestão calculada pelos serviços.
   const [pares, setPares] = useState(initial?.pares != null ? Number(initial.pares) : 0);
   const [paresManual, setParesManual] = useState(initial?.pares != null);
@@ -394,6 +467,18 @@ function EntryModal({ type, initial, onSave, onClose }) {
     setParesManual(true);
   }
   const opcoesOrigem = origem && !ORIGENS_CLIENTE.includes(origem) ? [...ORIGENS_CLIENTE, origem] : ORIGENS_CLIENTE;
+
+  // Busca de cliente cadastrado enquanto digita o nome.
+  const clienteSelecionado = clienteId ? clientes.find((c) => c.id === clienteId) : null;
+  const termoBusca = normalizarNome(nome);
+  const sugestoesCliente =
+    isVenda && !clienteId && termoBusca ? clientes.filter((c) => normalizarNome(c.nome).includes(termoBusca)).slice(0, 5) : [];
+  const nomeJaCadastrado = isVenda && !clienteId && clientes.some((c) => normalizarNome(c.nome) === termoBusca);
+  function escolherCliente(c) {
+    setNome(c.nome);
+    setClienteId(c.id);
+    if (!origem && c.origem) setOrigem(c.origem);
+  }
 
   function updateItem(itemId, patch) {
     setItens((prev) => prev.map((it) => (it.itemId === itemId ? { ...it, ...patch } : it)));
@@ -444,6 +529,7 @@ function EntryModal({ type, initial, onSave, onClose }) {
       onSave({
         id: initial?.id || uid(), data, cliente: nome.trim(), status, itens: itensClean, valor: totalClean,
         origem: origem || null, pares: paresValor,
+        clienteId: clienteId || null, telefoneNovo: telefoneNovo.trim(),
         assinaturaId: initial?.assinaturaId || null, mesReferencia: initial?.mesReferencia || null,
       });
     } else {
@@ -482,11 +568,50 @@ function EntryModal({ type, initial, onSave, onClose }) {
               <input
                 type="text"
                 value={nome}
-                onChange={(e) => setNome(e.target.value)}
-                placeholder={isVenda ? "Nome do cliente" : "Ex.: Conta de energia"}
+                onChange={(e) => {
+                  setNome(e.target.value);
+                  if (isVenda) setClienteId(null);
+                }}
+                placeholder={isVenda ? "Digite o nome para buscar ou cadastrar" : "Ex.: Conta de energia"}
                 style={inputStyle}
               />
             </Field>
+            {sugestoesCliente.length > 0 && (
+              <div style={{ marginTop: -6, border: "1px solid var(--paper-line)", borderRadius: 5, overflow: "hidden" }}>
+                {sugestoesCliente.map((c) => (
+                  <button
+                    type="button"
+                    key={c.id}
+                    onClick={() => escolherCliente(c)}
+                    style={{
+                      display: "flex", justifyContent: "space-between", gap: 8, width: "100%", textAlign: "left",
+                      padding: "8px 10px", border: "none", borderBottom: "1px solid var(--paper-line)", background: "#FFFDF8",
+                      cursor: "pointer", fontFamily: "Inter, sans-serif", fontSize: 13, color: "var(--ink)",
+                    }}
+                  >
+                    <span style={{ fontWeight: 600 }}>{c.nome}</span>
+                    <span style={{ color: "var(--muted)", fontSize: 11.5 }}>{formatTelefone(c.telefone) || c.bairro || "cadastrado"}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {isVenda && clienteSelecionado && (
+              <div style={{ marginTop: -6, fontSize: 11.5, color: "var(--green)", fontFamily: "Inter, sans-serif", fontWeight: 600 }}>
+                ✓ Cliente cadastrado{clienteSelecionado.telefone ? ` · ${formatTelefone(clienteSelecionado.telefone)}` : ""}
+              </div>
+            )}
+            {isVenda && podeCadastrarCliente && !clienteId && nome.trim() && !nomeJaCadastrado && (
+              <Field label="WhatsApp do cliente novo (opcional)">
+                <input
+                  type="tel"
+                  inputMode="tel"
+                  value={telefoneNovo}
+                  onChange={(e) => setTelefoneNovo(e.target.value)}
+                  placeholder="(65) 99999-9999"
+                  style={inputStyle}
+                />
+              </Field>
+            )}
 
             {isVenda && (
               <Field label="De onde veio o cliente?">
@@ -1406,6 +1531,283 @@ function MetaModal({ mesLabel, initial, onSave, onClose }) {
   );
 }
 
+// ---------- Ficha do cliente ----------
+function ClienteModal({ initial, vendas, onSave, onClose }) {
+  const [form, setForm] = useState(() => ({
+    nome: initial?.nome || "", telefone: initial?.telefone || "", instagram: initial?.instagram || "",
+    bairro: initial?.bairro || "", endereco: initial?.endereco || "", aniversario: initial?.aniversario || "",
+    origem: initial?.origem || "", observacoes: initial?.observacoes || "",
+  }));
+  const [error, setError] = useState("");
+  const set = (campo) => (e) => setForm((f) => ({ ...f, [campo]: e.target.value }));
+  const resumo = initial?.id ? resumoCliente(vendas, initial) : null;
+  const wa = linkWhatsApp(form.telefone);
+  const opcoesOrigem = form.origem && !ORIGENS_CLIENTE.includes(form.origem) ? [...ORIGENS_CLIENTE, form.origem] : ORIGENS_CLIENTE;
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!form.nome.trim()) {
+      setError("Informe o nome do cliente.");
+      return;
+    }
+    onSave({
+      id: initial?.id || uid(),
+      criadoEm: initial?.criadoEm || todayStr(),
+      ...form,
+      nome: form.nome.trim().replace(/\s+/g, " "),
+      instagram: form.instagram.trim().replace(/^@/, ""),
+    });
+  }
+
+  const linhaResumo = { display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, padding: "4px 0" };
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(23,20,15,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
+      onClick={onClose}
+    >
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 480, maxHeight: "90vh", overflowY: "auto" }}>
+        <LedgerCard style={{ padding: 22 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>
+              {initial?.id ? "Ficha do cliente" : "Novo cliente"}
+            </h3>
+            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
+              <X size={18} />
+            </button>
+          </div>
+
+          {resumo && (
+            <div style={{ border: "1px solid var(--paper-line)", borderRadius: 5, padding: "10px 12px", marginBottom: 14, fontFamily: "Inter, sans-serif" }}>
+              <div style={linhaResumo}><span style={{ color: "var(--muted)" }}>Total gasto</span><strong style={{ fontFamily: "'JetBrains Mono', monospace", color: "var(--green)" }}>{formatBRL(resumo.total)}</strong></div>
+              <div style={linhaResumo}><span style={{ color: "var(--muted)" }}>Vendas · pares</span><span>{resumo.qtd} venda{resumo.qtd === 1 ? "" : "s"} · {labelPares(resumo.pares)}</span></div>
+              <div style={linhaResumo}><span style={{ color: "var(--muted)" }}>Ticket médio</span><span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{formatBRL(resumo.ticket)}</span></div>
+              <div style={linhaResumo}>
+                <span style={{ color: "var(--muted)" }}>Última visita</span>
+                <span style={{ color: resumo.dias != null && resumo.dias >= DIAS_SUMIDO ? "var(--rust)" : "var(--ink)", fontWeight: 600 }}>
+                  {resumo.ultima ? `${formatDateBR(resumo.ultima)} (há ${resumo.dias} dia${resumo.dias === 1 ? "" : "s"})` : "—"}
+                </span>
+              </div>
+              {resumo.primeira && <div style={linhaResumo}><span style={{ color: "var(--muted)" }}>Cliente desde</span><span>{formatDateBR(resumo.primeira)}</span></div>}
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <Field label="Nome">
+              <input id="cliente-nome" type="text" value={form.nome} onChange={set("nome")} placeholder="Nome do cliente" style={inputStyle} />
+            </Field>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+              <Field label="WhatsApp">
+                <input id="cliente-telefone" type="tel" inputMode="tel" value={form.telefone} onChange={set("telefone")} placeholder="(65) 99999-9999" style={inputStyle} />
+              </Field>
+              <Field label="Instagram">
+                <input id="cliente-instagram" type="text" value={form.instagram} onChange={set("instagram")} placeholder="@usuario" style={inputStyle} />
+              </Field>
+              <Field label="Bairro">
+                <input id="cliente-bairro" type="text" value={form.bairro} onChange={set("bairro")} placeholder="Ex.: Parque das Nações" style={inputStyle} />
+              </Field>
+              <Field label="Aniversário">
+                <input id="cliente-aniversario" type="date" value={form.aniversario} onChange={set("aniversario")} style={inputStyle} />
+              </Field>
+            </div>
+            <Field label="Endereço (para busca e entrega)">
+              <input id="cliente-endereco" type="text" value={form.endereco} onChange={set("endereco")} placeholder="Rua, número, complemento" style={inputStyle} />
+            </Field>
+            <Field label="Como conheceu a PrimeStep">
+              <select id="cliente-origem" value={form.origem} onChange={set("origem")} style={inputStyle}>
+                <option value="">Selecione…</option>
+                {opcoesOrigem.map((o) => <option key={o} value={o}>{o}</option>)}
+              </select>
+            </Field>
+            <Field label="Observações">
+              <textarea
+                id="cliente-observacoes"
+                value={form.observacoes}
+                onChange={set("observacoes")}
+                rows={3}
+                placeholder="Tênis que costuma trazer, preferências, combinados…"
+                style={{ ...inputStyle, resize: "vertical", fontFamily: "Inter, sans-serif" }}
+              />
+            </Field>
+            {error && <div style={{ color: "var(--rust)", fontSize: 12.5, fontFamily: "Inter, sans-serif" }}>{error}</div>}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+              <button
+                type="submit"
+                style={{ flex: "1 1 160px", padding: "11px 14px", borderRadius: 5, border: "none", cursor: "pointer", background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 13.5 }}
+              >
+                Salvar ficha
+              </button>
+              {wa && (
+                <a
+                  href={wa}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ flex: "1 1 160px", textAlign: "center", padding: "11px 14px", borderRadius: 5, border: "1px solid var(--green)", color: "var(--green)", fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 13.5, textDecoration: "none" }}
+                >
+                  Chamar no WhatsApp
+                </a>
+              )}
+            </div>
+          </form>
+
+          {resumo && resumo.vendas.length > 0 && (
+            <div style={{ marginTop: 18 }}>
+              <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600, marginBottom: 8 }}>
+                Histórico
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {resumo.vendas
+                  .slice()
+                  .sort((a, b) => (a.data < b.data ? 1 : -1))
+                  .map((v) => (
+                    <div key={v.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontFamily: "Inter, sans-serif", fontSize: 12.5, borderBottom: "1px solid var(--paper-line)", paddingBottom: 6 }}>
+                      <span>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "var(--muted)", marginRight: 8 }}>{formatDateBR(v.data)}</span>
+                        {(v.itens || []).map((i) => (i.quantidade > 1 ? `${i.servico} (x${i.quantidade})` : i.servico)).join(", ")}
+                      </span>
+                      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: "var(--green)", whiteSpace: "nowrap" }}>{formatBRL(v.valor)}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+        </LedgerCard>
+      </div>
+    </div>
+  );
+}
+
+function ClientesTab({ clientes, clientesOk, vendas, onAbrir, onExcluir, onImportar }) {
+  const [busca, setBusca] = useState("");
+  const [filtro, setFiltro] = useState("todos"); // todos | sumidos | aniversario
+  const mesAtual = new Date().getMonth() + 1;
+
+  const linhas = useMemo(
+    () => clientes.map((c) => ({ c, r: resumoCliente(vendas, c) })),
+    [clientes, vendas]
+  );
+  const nomesSemFicha = useMemo(() => {
+    const comFicha = new Set(clientes.map((c) => normalizarNome(c.nome)));
+    const ids = new Set(clientes.map((c) => c.id));
+    const set = new Set();
+    vendas.forEach((v) => {
+      if (v.assinaturaId || (v.clienteId && ids.has(v.clienteId))) return;
+      const n = normalizarNome(v.cliente);
+      if (n && !comFicha.has(n)) set.add(n);
+    });
+    return set.size;
+  }, [clientes, vendas]);
+
+  const sumidos = linhas.filter((l) => l.r.dias != null && l.r.dias >= DIAS_SUMIDO);
+  const aniversariantes = linhas.filter((l) => l.c.aniversario && Number(l.c.aniversario.slice(5, 7)) === mesAtual);
+  const termo = normalizarNome(busca);
+  let lista = filtro === "sumidos" ? sumidos : filtro === "aniversario" ? aniversariantes : linhas;
+  if (termo) {
+    lista = lista.filter((l) => normalizarNome(l.c.nome).includes(termo) || (l.c.telefone || "").replace(/\D/g, "").includes(busca.replace(/\D/g, "") || "#") || normalizarNome(l.c.bairro).includes(termo));
+  }
+  lista = lista.slice().sort((a, b) =>
+    filtro === "sumidos" ? (b.r.dias || 0) - (a.r.dias || 0) : (b.r.ultima || "").localeCompare(a.r.ultima || "") || porNome(a.c, b.c)
+  );
+
+  const chip = (key, label) => (
+    <button
+      key={key}
+      onClick={() => setFiltro(key)}
+      style={{
+        padding: "6px 11px", borderRadius: 4, border: "1px solid var(--paper-line)",
+        background: filtro === key ? "var(--ink)" : "transparent", color: filtro === key ? "var(--paper)" : "var(--muted)",
+        fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 12, cursor: "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  if (!clientesOk) {
+    return (
+      <LedgerCard style={{ padding: "22px 18px", fontFamily: "Inter, sans-serif", fontSize: 13.5, color: "var(--ink)", lineHeight: 1.5 }}>
+        A ficha de clientes ainda não está ativa: falta rodar no Supabase o comando que cria a tabela de clientes.
+      </LedgerCard>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {nomesSemFicha > 0 && (
+        <LedgerCard style={{ padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontFamily: "Inter, sans-serif", fontSize: 13, color: "var(--ink)" }}>
+            <strong>{nomesSemFicha}</strong> cliente{nomesSemFicha === 1 ? "" : "s"} das vendas ainda não {nomesSemFicha === 1 ? "tem" : "têm"} ficha.
+          </span>
+          <button
+            onClick={onImportar}
+            style={{ padding: "8px 12px", borderRadius: 5, border: "none", background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}
+          >
+            Criar fichas a partir das vendas
+          </button>
+        </LedgerCard>
+      )}
+
+      <LedgerCard style={{ padding: "12px 14px 4px" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+          <input
+            id="clientes-busca"
+            type="search"
+            value={busca}
+            onChange={(e) => setBusca(e.target.value)}
+            placeholder="Buscar por nome, telefone ou bairro"
+            style={{ ...inputStyle, flex: "1 1 220px", minWidth: 0 }}
+          />
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {chip("todos", `Todos (${linhas.length})`)}
+            {chip("sumidos", `Sumidos há ${DIAS_SUMIDO}+ dias (${sumidos.length})`)}
+            {chip("aniversario", `Aniversariantes do mês (${aniversariantes.length})`)}
+          </div>
+        </div>
+
+        {lista.length === 0 ? (
+          <div style={{ padding: "22px 6px", textAlign: "center", color: "var(--muted)", fontFamily: "Inter, sans-serif", fontSize: 13.5 }}>
+            {linhas.length === 0 ? "Nenhum cliente cadastrado ainda." : "Nenhum cliente encontrado."}
+          </div>
+        ) : (
+          lista.map(({ c, r }) => {
+            const wa = linkWhatsApp(c.telefone);
+            const sumido = r.dias != null && r.dias >= DIAS_SUMIDO;
+            return (
+              <div key={c.id} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, padding: "12px 4px", borderTop: "1px solid var(--paper-line)", fontFamily: "Inter, sans-serif" }}>
+                <button onClick={() => onAbrir(c)} style={{ flex: "1 1 200px", minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--ink)" }}>
+                  <div style={{ fontSize: 14, fontWeight: 700 }}>{c.nome}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                    {[formatTelefone(c.telefone), c.bairro, c.origem].filter(Boolean).join(" · ") || "Sem contato cadastrado"}
+                  </div>
+                </button>
+                <div style={{ textAlign: "right", minWidth: 120 }}>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 13.5, color: "var(--green)" }}>{formatBRL(r.total)}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>{r.qtd} venda{r.qtd === 1 ? "" : "s"} · {labelPares(r.pares)}</div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: sumido ? "var(--rust)" : "var(--muted)" }}>
+                    {r.ultima ? `última há ${r.dias} dia${r.dias === 1 ? "" : "s"}` : "sem vendas"}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  {wa && (
+                    <a href={wa} target="_blank" rel="noreferrer" title="Chamar no WhatsApp" style={{ fontSize: 11.5, fontWeight: 700, color: "var(--green)", textDecoration: "none", border: "1px solid var(--green)", borderRadius: 4, padding: "4px 8px" }}>
+                      WhatsApp
+                    </a>
+                  )}
+                  <button onClick={() => onAbrir(c)} title="Abrir ficha" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
+                    <Pencil size={14} />
+                  </button>
+                  <button onClick={() => onExcluir(c.id)} title="Excluir ficha" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 4 }}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </LedgerCard>
+    </div>
+  );
+}
+
 // ---------- Ledger row list ----------
 function LedgerRow({ children, onEdit, onDelete }) {
   return (
@@ -1440,6 +1842,8 @@ function PrimeStepApp() {
   const [assinaturas, setAssinaturas] = useState([]);
   const [pedidos, setPedidos] = useState([]);
   const [metas, setMetas] = useState({}); // metas salvas no banco, por mês (AAAA-MM)
+  const [clientes, setClientes] = useState([]);
+  const [clientesOk, setClientesOk] = useState(true); // false = tabela de clientes ainda não existe
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
   const [modal, setModal] = useState(null); // {type: 'venda'|'despesa'|'assinatura'|'pedido', initial?}
@@ -1448,12 +1852,14 @@ function PrimeStepApp() {
 
   useEffect(() => {
     (async () => {
-      const [v, d, a, p, mt] = await Promise.all([loadVendas(), loadDespesas(), loadAssinaturas(), loadPedidos(), loadMetas()]);
+      const [v, d, a, p, mt, cl] = await Promise.all([loadVendas(), loadDespesas(), loadAssinaturas(), loadPedidos(), loadMetas(), loadClientes()]);
       setVendas(v);
       setDespesas(d);
       setAssinaturas(a);
       setPedidos(p);
       setMetas(mt);
+      setClientes(cl || []);
+      setClientesOk(cl !== null);
       setLoading(false);
     })();
   }, []);
@@ -1474,6 +1880,11 @@ function PrimeStepApp() {
     if (changed?.type === "upsert") upsertAssinatura(changed.item);
     if (changed?.type === "delete") deleteAssinaturaRow(changed.id);
   }, []);
+  const persistClientes = useCallback((list, changed) => {
+    setClientes(list);
+    if (changed?.type === "upsert") upsertCliente(changed.item);
+    if (changed?.type === "delete") deleteClienteRow(changed.id);
+  }, []);
   const persistPedidos = useCallback((list, changed) => {
     setPedidos(list);
     if (changed?.type === "upsert") upsertPedido(changed.item);
@@ -1483,7 +1894,7 @@ function PrimeStepApp() {
   const [importMsg, setImportMsg] = useState("");
 
   function handleExport() {
-    const payload = { app: "primestep-controle-financeiro", exportadoEm: new Date().toISOString(), vendas, despesas, assinaturas, pedidos, metas };
+    const payload = { app: "primestep-controle-financeiro", exportadoEm: new Date().toISOString(), vendas, despesas, assinaturas, pedidos, metas, clientes };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1508,6 +1919,7 @@ function PrimeStepApp() {
         // Backups antigos não têm pares em processo nem metas: nesse caso, eles ficam como estão.
         const pd = Array.isArray(parsed.pedidos) ? parsed.pedidos : null;
         const mt = parsed.metas && typeof parsed.metas === "object" && !Array.isArray(parsed.metas) ? parsed.metas : null;
+        const cl = Array.isArray(parsed.clientes) ? parsed.clientes : null;
         if (!v || !d) throw new Error("formato inválido");
         const ok = window.confirm(
           `Este backup tem ${v.length} venda(s), ${d.length} despesa(s), ${a.length} assinatura(s)${pd ? ` e ${pd.length} par(es) em processo` : ""}.\nIsso vai SUBSTITUIR os dados atuais (${vendas.length} venda(s), ${despesas.length} despesa(s), ${assinaturas.length} assinatura(s)${pd ? `, ${pedidos.length} par(es) em processo` : ""}). Continuar?`
@@ -1529,6 +1941,11 @@ function PrimeStepApp() {
           await Promise.all(Object.entries(mt).map(([mes, m]) => upsertMeta(mes, m)));
           setMetas(mt);
         }
+        if (cl && clientesOk) {
+          await Promise.all(clientes.map((old) => deleteClienteRow(old.id)));
+          await Promise.all(cl.map((item) => upsertCliente(item)));
+          setClientes(cl.slice().sort(porNome));
+        }
         setVendas(v);
         setDespesas(d);
         setAssinaturas(a);
@@ -1543,8 +1960,25 @@ function PrimeStepApp() {
     e.target.value = "";
   }
 
-  function handleSaveEntry(entry) {
+  function handleSaveEntry(entrada) {
+    let entry = entrada;
     if (modal.type === "venda") {
+      // Liga a venda à ficha do cliente; se for um cliente novo, cria a ficha na hora.
+      const { telefoneNovo, ...venda } = entrada;
+      if (clientesOk && !venda.assinaturaId && !venda.clienteId) {
+        const existente = clientes.find((c) => normalizarNome(c.nome) === normalizarNome(venda.cliente));
+        if (existente) {
+          venda.clienteId = existente.id;
+        } else {
+          const novo = {
+            id: uid(), nome: venda.cliente, telefone: telefoneNovo || "", instagram: "", bairro: "", endereco: "",
+            aniversario: "", origem: venda.origem || "", observacoes: "", criadoEm: venda.data,
+          };
+          persistClientes([...clientes, novo].sort(porNome), { type: "upsert", item: novo });
+          venda.clienteId = novo.id;
+        }
+      }
+      entry = venda;
       const exists = vendas.some((v) => v.id === entry.id);
       persistVendas(exists ? vendas.map((v) => (v.id === entry.id ? entry : v)) : [entry, ...vendas], { type: "upsert", item: entry });
     } else if (modal.type === "despesa") {
@@ -1568,6 +2002,55 @@ function PrimeStepApp() {
   }
   function deleteAssinatura(id) {
     persistAssinaturas(assinaturas.filter((a) => a.id !== id), { type: "delete", id });
+  }
+  function salvarCliente(c) {
+    const anterior = clientes.find((x) => x.id === c.id);
+    const exists = !!anterior;
+    persistClientes((exists ? clientes.map((x) => (x.id === c.id ? c : x)) : [...clientes, c]).sort(porNome), { type: "upsert", item: c });
+    // Se o nome mudou, leva junto as vendas antigas desse cliente (que estavam ligadas só pelo nome).
+    if (anterior && normalizarNome(anterior.nome) !== normalizarNome(c.nome)) {
+      const nomeAntigo = normalizarNome(anterior.nome);
+      const atualizadas = [];
+      const novaLista = vendas.map((v) => {
+        if (v.clienteId === c.id || (!v.clienteId && normalizarNome(v.cliente) === nomeAntigo)) {
+          const nv = { ...v, clienteId: c.id, cliente: c.nome };
+          atualizadas.push(nv);
+          return nv;
+        }
+        return v;
+      });
+      setVendas(novaLista);
+      atualizadas.forEach((v) => upsertVenda(v));
+    }
+    setModal(null);
+  }
+  function deleteCliente(id) {
+    persistClientes(clientes.filter((c) => c.id !== id), { type: "delete", id });
+  }
+  // Cria uma ficha para cada nome das vendas antigas que ainda não tem cadastro.
+  async function importarClientesDasVendas() {
+    const conhecidos = new Set(clientes.map((c) => normalizarNome(c.nome)));
+    const novos = {};
+    vendas
+      .slice()
+      .sort((a, b) => (a.data < b.data ? -1 : 1))
+      .forEach((v) => {
+        if (v.assinaturaId) return;
+        const n = normalizarNome(v.cliente);
+        if (!n || conhecidos.has(n)) return;
+        if (!novos[n]) {
+          novos[n] = {
+            id: uid(), nome: (v.cliente || "").trim().replace(/\s+/g, " "), telefone: "", instagram: "", bairro: "",
+            endereco: "", aniversario: "", origem: v.origem || "", observacoes: "", criadoEm: v.data || todayStr(),
+          };
+        } else if (v.origem) {
+          novos[n].origem = v.origem; // fica com a origem da venda mais recente
+        }
+      });
+    const lista = Object.values(novos);
+    if (!lista.length) return;
+    setClientes([...clientes, ...lista].sort(porNome));
+    await Promise.all(lista.map((c) => upsertCliente(c)));
   }
   function deletePedido(id) {
     persistPedidos(pedidos.filter((p) => p.id !== id), { type: "delete", id });
@@ -1944,6 +2427,7 @@ function PrimeStepApp() {
               {[
                 ["operacional", `Operacional (${pedidos.filter((p) => p.etapa !== "liberado").length})`],
                 ["vendas", `Vendas (${vendasMes.length})`],
+                ["clientes", `Clientes (${clientes.length})`],
                 ["meta", "Meta"],
                 ["despesas", `Despesas (${despesasMes.length})`],
                 ["assinaturas", `Assinaturas (${assinaturas.length})`],
@@ -1970,16 +2454,27 @@ function PrimeStepApp() {
               <div style={{ flex: 1 }} />
               {tab !== "analises" && tab !== "historico" && tab !== "calendario" && tab !== "meta" && (
                 <button
-                  onClick={() => setModal({ type: tab === "despesas" ? "despesa" : tab === "assinaturas" ? "assinatura" : tab === "operacional" ? "pedido" : "venda" })}
+                  onClick={() => setModal({ type: tab === "despesas" ? "despesa" : tab === "assinaturas" ? "assinatura" : tab === "operacional" ? "pedido" : tab === "clientes" ? "cliente" : "venda" })}
                   style={{
                     display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 6, border: "none",
                     background: "var(--gold)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer",
                   }}
                 >
-                  <Plus size={15} /> {tab === "assinaturas" ? "Nova assinatura" : tab === "operacional" ? "Novo par" : `Novo ${tab === "despesas" ? "gasto" : "registro"}`}
+                  <Plus size={15} /> {tab === "assinaturas" ? "Nova assinatura" : tab === "operacional" ? "Novo par" : tab === "clientes" ? "Novo cliente" : `Novo ${tab === "despesas" ? "gasto" : "registro"}`}
                 </button>
               )}
             </div>
+
+            {tab === "clientes" && (
+              <ClientesTab
+                clientes={clientes}
+                clientesOk={clientesOk}
+                vendas={vendas}
+                onAbrir={(c) => setModal({ type: "cliente", initial: c })}
+                onExcluir={deleteCliente}
+                onImportar={importarClientesDasVendas}
+              />
+            )}
 
             {tab === "meta" && (
               <MetaPainel
@@ -2639,7 +3134,7 @@ function PrimeStepApp() {
             )}
 
             {/* List */}
-            {tab !== "analises" && tab !== "historico" && tab !== "assinaturas" && tab !== "operacional" && tab !== "calendario" && tab !== "meta" && (
+            {tab !== "analises" && tab !== "historico" && tab !== "assinaturas" && tab !== "operacional" && tab !== "calendario" && tab !== "meta" && tab !== "clientes" && (
             <LedgerCard style={{ padding: "6px 14px 4px" }}>
               {tab !== "despesas" ? (
                 vendasMes.length === 0 ? (
@@ -2748,10 +3243,20 @@ function PrimeStepApp() {
           onClose={() => setModal(null)}
         />
       )}
-      {modal && modal.type !== "assinatura" && modal.type !== "pedido" && modal.type !== "meta" && (
+      {modal && modal.type === "cliente" && (
+        <ClienteModal
+          initial={modal.initial}
+          vendas={vendas}
+          onSave={salvarCliente}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal && modal.type !== "assinatura" && modal.type !== "pedido" && modal.type !== "meta" && modal.type !== "cliente" && (
         <EntryModal
           type={modal.type}
           initial={modal.initial}
+          clientes={clientes}
+          podeCadastrarCliente={clientesOk}
           onSave={handleSaveEntry}
           onClose={() => setModal(null)}
         />
