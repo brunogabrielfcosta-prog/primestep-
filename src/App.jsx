@@ -193,6 +193,27 @@ function resumoCliente(vendas, c) {
 const porNome = (a, b) => normalizarNome(a.nome).localeCompare(normalizarNome(b.nome));
 const DIAS_SUMIDO = 60;
 
+// ---------- Custos e lucro ----------
+// Lê valores digitados como "70", "70,50" ou "1.234,56".
+function parseValor(txt) {
+  const t = String(txt ?? "").trim();
+  if (!t) return 0;
+  const limpo = t.includes(",") ? t.replace(/\./g, "").replace(",", ".") : t;
+  const n = parseFloat(limpo);
+  return Number.isFinite(n) ? n : 0;
+}
+// Valor que o cliente pagou de fato (vendas antigas: o total da venda).
+function valorRecebido(v) {
+  return v.valorPago != null ? Number(v.valorPago) : Number(v.valor || 0);
+}
+// Lucro real = valor pago pelo cliente − custo do serviço − custo da entrega.
+function lucroDaVenda(v) {
+  return valorRecebido(v) - Number(v.custo || 0) - Number(v.custoEntrega || 0);
+}
+function somaLucro(lista) {
+  return lista.reduce((s, v) => s + lucroDaVenda(v), 0);
+}
+
 function contarClientes(lista) {
   return new Set(lista.map((v) => (v.cliente || "").trim().toLowerCase())).size;
 }
@@ -205,6 +226,9 @@ function rowToVenda(row) {
     assinaturaId: row.assinatura_id || null, mesReferencia: row.mes_referencia || null,
     origem: row.origem || null, pares: row.pares != null ? Number(row.pares) : null,
     clienteId: row.cliente_id || null,
+    custo: row.custo != null ? Number(row.custo) : null,
+    custoEntrega: row.custo_entrega != null ? Number(row.custo_entrega) : null,
+    valorPago: row.valor_pago != null ? Number(row.valor_pago) : null,
   };
 }
 function rowToCliente(r) {
@@ -309,16 +333,22 @@ async function upsertVenda(v) {
     assinatura_id: v.assinaturaId || null, mes_referencia: v.mesReferencia || null,
   };
   const comOrigem = { ...base, origem: v.origem || null, pares: v.pares != null ? v.pares : null };
-  const completo = { ...comOrigem, cliente_id: v.clienteId || null };
+  const comCliente = { ...comOrigem, cliente_id: v.clienteId || null };
+  const completo = {
+    ...comCliente,
+    custo: v.custo != null ? v.custo : null,
+    custo_entrega: v.custoEntrega != null ? v.custoEntrega : null,
+    valor_pago: v.valorPago != null ? v.valorPago : null,
+  };
   // Tenta salvar tudo. Se alguma coluna nova ainda não existir no banco, salva sem ela
   // (para não perder a venda) e avisa uma vez.
-  for (const payload of [completo, comOrigem, base]) {
+  for (const payload of [completo, comCliente, comOrigem, base]) {
     const { error } = await supabase.from("vendas").upsert(payload);
     if (!error) {
       if (payload !== completo && !avisoColunasMostrado) {
         avisoColunasMostrado = true;
         window.alert(
-          "A venda foi salva, mas parte das informações novas (ficha do cliente, origem ou pares) não foi gravada: falta rodar o último comando SQL no Supabase."
+          "A venda foi salva, mas parte das informações novas (custos, ficha do cliente, origem ou pares) não foi gravada: falta rodar o último comando SQL no Supabase."
         );
       }
       return;
@@ -452,6 +482,12 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
   // Pares: enquanto você não mexer no campo, ele acompanha a sugestão calculada pelos serviços.
   const [pares, setPares] = useState(initial?.pares != null ? Number(initial.pares) : 0);
   const [paresManual, setParesManual] = useState(initial?.pares != null);
+  // Custos e lucro da venda. O valor pago acompanha o total até você mudar (ex.: desconto).
+  const fmtCampo = (n) => (n != null && n !== "" ? String(n).replace(".", ",") : "");
+  const [custo, setCusto] = useState(fmtCampo(initial?.custo));
+  const [custoEntrega, setCustoEntrega] = useState(fmtCampo(initial?.custoEntrega));
+  const [valorPago, setValorPago] = useState(fmtCampo(initial?.valorPago));
+  const [valorPagoManual, setValorPagoManual] = useState(initial?.valorPago != null);
   const [itens, setItens] = useState(() => {
     if (!isVenda) return [];
     const source = initial?.itens?.length ? initial.itens : initial?.servico ? [{ servico: initial.servico, valor: initial.valor }] : null;
@@ -553,6 +589,9 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
         id: initial?.id || uid(), data, cliente: nome.trim(), status, itens: itensClean, valor: totalClean,
         origem: origem || null, pares: paresValor,
         clienteId: clienteId || null, dadosCliente,
+        custo: custo.trim() ? parseValor(custo) : null,
+        custoEntrega: custoEntrega.trim() ? parseValor(custoEntrega) : null,
+        valorPago: valorPagoManual && valorPago.trim() ? parseValor(valorPago) : totalClean,
         assinaturaId: initial?.assinaturaId || null, mesReferencia: initial?.mesReferencia || null,
       });
     } else {
@@ -814,6 +853,56 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                     {formatBRL(total)}
                   </span>
                 </div>
+
+                {/* Custos e lucro real */}
+                {(() => {
+                  const pago = valorPagoManual ? parseValor(valorPago) : total;
+                  const lucro = pago - parseValor(custo) - parseValor(custoEntrega);
+                  const margem = pago > 0 ? (lucro / pago) * 100 : 0;
+                  const desconto = total - pago;
+                  return (
+                    <div style={{ border: "1px solid var(--paper-line)", borderRadius: 5, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
+                      <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--ink)" }}>
+                        Custos e lucro
+                      </span>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10 }}>
+                        <Field label="Custo (terceirizado, produto)">
+                          <input id="venda-custo" type="text" inputMode="decimal" value={custo} onChange={(e) => setCusto(e.target.value)} placeholder="0,00" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+                        </Field>
+                        <Field label="Entrega (custo)">
+                          <input id="venda-entrega" type="text" inputMode="decimal" value={custoEntrega} onChange={(e) => setCustoEntrega(e.target.value)} placeholder="0,00" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+                        </Field>
+                        <Field label="Valor pago pelo cliente">
+                          <input
+                            id="venda-valor-pago"
+                            type="text"
+                            inputMode="decimal"
+                            value={valorPagoManual ? valorPago : fmtCampo(Math.round(total * 100) / 100)}
+                            onChange={(e) => {
+                              setValorPago(e.target.value);
+                              setValorPagoManual(true);
+                            }}
+                            style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }}
+                          />
+                        </Field>
+                      </div>
+                      {desconto > 0.009 && (
+                        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)" }}>
+                          Desconto de {formatBRL(desconto)} sobre o total.
+                        </span>
+                      )}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8, borderTop: "1px solid var(--paper-line)" }}>
+                        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                          Lucro real
+                        </span>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 18, color: lucro >= 0 ? "var(--green)" : "var(--rust)" }}>
+                          {formatBRL(lucro)}
+                          <span style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", marginLeft: 6 }}>{fmtPct(margem)}</span>
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </>
             ) : (
               <>
@@ -1095,7 +1184,7 @@ function DayDetailModal({ iso, vendasDoDia, onEdit, onDelete, onAddNew, onClose 
           {vendasDoDia.length > 0 && (
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid var(--paper-line)", marginBottom: 8 }}>
               <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>
-                {clientesDia} cliente{clientesDia > 1 ? "s" : ""} · <strong style={{ color: "var(--ink)" }}>{labelPares(paresDia)}</strong>
+                {clientesDia} cliente{clientesDia > 1 ? "s" : ""} · <strong style={{ color: "var(--ink)" }}>{labelPares(paresDia)}</strong> · lucro {formatBRL(somaLucro(vendasDoDia))}
               </span>
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: "var(--green)" }}>
                 {formatBRL(total)}
@@ -2276,6 +2365,8 @@ function PrimeStepApp() {
   const saldo = totalReceitas - totalDespesas;
   const pendentes = vendasMes.filter((v) => v.status === "pendente").reduce((s, v) => s + Number(v.valor || 0), 0);
   const paresMes = somaPares(vendasMes);
+  const lucroVendasMes = somaLucro(vendasMes);
+  const custosVendasMes = vendasMes.reduce((s, v) => s + Number(v.custo || 0) + Number(v.custoEntrega || 0), 0);
 
   const alvoMes = metas[monthFilter] || METAS_PADRAO[monthFilter] || null;
   const analiseMeta = useMemo(
@@ -2590,6 +2681,8 @@ function PrimeStepApp() {
               <StatCard label="Saldo" value={formatBRL(saldo)} icon={Wallet} tone={saldo >= 0 ? "up" : "down"} />
               <StatCard label="A receber (pendente)" value={formatBRL(pendentes)} icon={Clock} />
               <StatCard label="Pares feitos no mês" value={String(paresMes)} icon={Check} />
+              <StatCard label="Lucro real das vendas" value={formatBRL(lucroVendasMes)} icon={TrendingUp} tone={lucroVendasMes >= 0 ? "up" : "down"} />
+              <StatCard label="Custos das vendas" value={formatBRL(custosVendasMes)} icon={TrendingDown} tone="down" />
             </div>
 
             {/* Meta do mês */}
@@ -3356,6 +3449,11 @@ function PrimeStepApp() {
                           <span style={{ display: "block", fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
                             <span style={{ color: "var(--ink)", fontWeight: 600 }}>{labelPares(paresDaVenda(v))}</span>
                             {v.origem ? ` · ${v.origem}` : ""}
+                            {" · "}
+                            <span style={{ color: lucroDaVenda(v) >= 0 ? "var(--green)" : "var(--rust)", fontWeight: 600 }}>
+                              lucro {formatBRL(lucroDaVenda(v))}
+                            </span>
+                            {v.custo == null && v.custoEntrega == null && !v.assinaturaId ? " (sem custo lançado)" : ""}
                           </span>
                         </span>
                         <span
