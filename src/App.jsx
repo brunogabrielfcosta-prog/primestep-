@@ -210,6 +210,12 @@ function valorRecebido(v) {
 function lucroDaVenda(v) {
   return valorRecebido(v) - Number(v.custo || 0) - Number(v.custoEntrega || 0);
 }
+// Custos lançados nas vendas (terceirização/produto e entrega). Entram nas despesas do mês.
+function custosDasVendas(lista) {
+  const terceirizacao = lista.reduce((s, v) => s + Number(v.custo || 0), 0);
+  const entregas = lista.reduce((s, v) => s + Number(v.custoEntrega || 0), 0);
+  return { terceirizacao, entregas, total: terceirizacao + entregas };
+}
 function somaLucro(lista) {
   return lista.reduce((s, v) => s + lucroDaVenda(v), 0);
 }
@@ -2072,6 +2078,141 @@ function RecadoDoDia({ itens, hoje }) {
   );
 }
 
+// ---------- Resumo do mês ----------
+function ResumoDoMes({ vendas, despesas, clientes, mesKey, mesLabel, alvo }) {
+  const doMes = (lista, k) => lista.filter((x) => x.data?.startsWith(k));
+  const [y, m] = mesKey.split("-").map(Number);
+  const prev = new Date(y, m - 2, 1);
+  const prevKey = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+
+  function calcular(k) {
+    const vs = doMes(vendas, k);
+    const ds = doMes(despesas, k);
+    const receitas = somaValor(vs);
+    const recebido = vs.reduce((s, v) => s + valorRecebido(v), 0);
+    const descontos = Math.max(0, receitas - recebido);
+    const cv = custosDasVendas(vs);
+    const outras = ds.reduce((s, d) => s + Number(d.valor || 0), 0);
+    const lucro = recebido - cv.total - outras;
+    return { vs, receitas, recebido, descontos, cv, outras, lucro, margem: recebido > 0 ? (lucro / recebido) * 100 : 0 };
+  }
+  const atual = calcular(mesKey);
+  const anterior = calcular(prevKey);
+  const vs = atual.vs;
+  const avulsas = vs.filter((v) => !v.assinaturaId);
+
+  // Clientes novos x que voltaram (pela ficha, ou pelo nome nas vendas antigas).
+  const chave = (v) => v.clienteId || `n:${normalizarNome(v.cliente)}`;
+  const primeiraCompra = {};
+  vendas.forEach((v) => {
+    if (v.assinaturaId || !v.data) return;
+    const k = chave(v);
+    if (!primeiraCompra[k] || v.data < primeiraCompra[k]) primeiraCompra[k] = v.data;
+  });
+  const clientesMes = [...new Set(avulsas.map(chave))];
+  const novos = clientesMes.filter((k) => (primeiraCompra[k] || "").startsWith(mesKey)).length;
+  const voltaram = clientesMes.length - novos;
+
+  const somaPor = (campo) => {
+    const t = {};
+    avulsas.forEach((v) => {
+      const k = campo(v);
+      if (k) t[k] = (t[k] || 0) + Number(v.valor || 0);
+    });
+    return Object.entries(t).sort((a, b) => b[1] - a[1]);
+  };
+  const origens = somaPor((v) => v.origem);
+  const servicos = {};
+  avulsas.forEach((v) => (v.itens || []).forEach((it) => { servicos[it.servico] = (servicos[it.servico] || 0) + Number(it.valor || 0); }));
+  const topServico = Object.entries(servicos).sort((a, b) => b[1] - a[1])[0];
+  const semCusto = avulsas.filter((v) => v.custo == null && v.custoEntrega == null).length;
+  const pendente = somaValor(vs.filter((v) => v.status === "pendente"));
+  const varPct = (a, b) => (b ? (a / b - 1) * 100 : null);
+
+  const linhas = [
+    ["Faturamento", formatBRL(atual.receitas), "var(--ink)"],
+    ...(atual.descontos > 0.009 ? [["(−) Descontos", formatBRL(atual.descontos), "var(--rust)"]] : []),
+    ["(−) Terceirização e produtos", formatBRL(atual.cv.terceirizacao), "var(--rust)"],
+    ["(−) Entregas", formatBRL(atual.cv.entregas), "var(--rust)"],
+    ["(−) Outras despesas", formatBRL(atual.outras), "var(--rust)"],
+  ];
+
+  const destaques = [];
+  if (anterior.receitas > 0) {
+    const vr = varPct(atual.receitas, anterior.receitas);
+    const vl = anterior.lucro !== 0 ? varPct(atual.lucro, anterior.lucro) : null;
+    destaques.push({ tom: vr >= 0 ? "ok" : "atencao", texto: `Faturamento ${fmtVar(vr)} em relação ao mês anterior (${formatBRL(anterior.receitas)})${vl !== null && anterior.lucro > 0 ? `; lucro ${fmtVar(vl)}` : ""}.` });
+  }
+  if (alvo) {
+    const pct = (atual.receitas / alvo.meta) * 100;
+    destaques.push({
+      tom: atual.receitas >= alvo.meta ? "ok" : "atencao",
+      texto: atual.receitas >= alvo.superMeta
+        ? `Super meta batida: ${fmtPct((atual.receitas / alvo.superMeta) * 100)} de ${formatBRL(alvo.superMeta)}.`
+        : `Meta: ${fmtPct(pct)} de ${formatBRL(alvo.meta)}${atual.receitas >= alvo.meta ? " — batida!" : `, faltando ${formatBRL(alvo.meta - atual.receitas)}`}.`,
+    });
+  }
+  if (clientesMes.length) destaques.push({ tom: "info", texto: `${clientesMes.length} cliente${clientesMes.length === 1 ? "" : "s"} atendido${clientesMes.length === 1 ? "" : "s"}: ${novos} novo${novos === 1 ? "" : "s"} e ${voltaram} que já ${voltaram === 1 ? "era cliente" : "eram clientes"}.` });
+  if (origens.length) destaques.push({ tom: "info", texto: `Canal que mais faturou: ${origens[0][0]} (${formatBRL(origens[0][1])}, ${fmtPct((origens[0][1] / Math.max(1, somaValor(avulsas))) * 100)} das vendas avulsas).` });
+  if (topServico) destaques.push({ tom: "info", texto: `Serviço que mais faturou: ${topServico[0]} (${formatBRL(topServico[1])}).` });
+  if (pendente > 0) destaques.push({ tom: "atencao", texto: `${formatBRL(pendente)} ainda pendente de receber.` });
+  if (semCusto > 0) destaques.push({ tom: "atencao", texto: `${semCusto} venda${semCusto === 1 ? "" : "s"} sem custo lançado: o lucro real pode estar maior do que é.` });
+
+  const cor = { atencao: "var(--rust)", ok: "var(--green)", info: "var(--ink)" };
+  const icone = { atencao: "⚠️", ok: "✅", info: "💡" };
+  const rotulo = { fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 };
+  const kpis = [
+    ["Vendas", String(vs.length)],
+    ["Pares", String(somaPares(vs))],
+    ["Ticket médio", formatBRL(avulsas.length ? somaValor(avulsas) / avulsas.length : 0)],
+    ["Margem", fmtPct(atual.margem)],
+  ];
+
+  return (
+    <LedgerCard style={{ padding: "16px 16px 14px" }}>
+      <div style={{ ...rotulo, marginBottom: 12 }}>Resumo do mês — {mesLabel}</div>
+      {vs.length === 0 && atual.outras === 0 ? (
+        <div style={{ fontFamily: "Inter, sans-serif", fontSize: 13.5, color: "var(--muted)" }}>Nenhum lançamento neste mês.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ fontFamily: "Inter, sans-serif" }}>
+            {linhas.map(([l, v, c]) => (
+              <div key={l} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, padding: "5px 0", borderBottom: "1px solid var(--paper-line)" }}>
+                <span style={{ color: "var(--muted)" }}>{l}</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: c }}>{v}</span>
+              </div>
+            ))}
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "9px 0 0", alignItems: "baseline" }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Lucro líquido</span>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 18, color: atual.lucro >= 0 ? "var(--green)" : "var(--rust)" }}>
+                {formatBRL(atual.lucro)}
+              </span>
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 10 }}>
+            {kpis.map(([l, v]) => (
+              <div key={l}>
+                <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", marginBottom: 2 }}>{l}</div>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>{v}</div>
+              </div>
+            ))}
+          </div>
+          {destaques.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {destaques.map((d, i) => (
+                <div key={i} style={{ display: "flex", gap: 9, alignItems: "flex-start", fontFamily: "Inter, sans-serif", fontSize: 13, lineHeight: 1.5, color: "var(--ink)", paddingLeft: 10, borderLeft: `3px solid ${cor[d.tom]}` }}>
+                  <span>{icone[d.tom]}</span>
+                  <span>{d.texto}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </LedgerCard>
+  );
+}
+
 // ---------- Ledger row list ----------
 function LedgerRow({ children, onEdit, onDelete }) {
   return (
@@ -2361,12 +2502,14 @@ function PrimeStepApp() {
   const despesasMes = useMemo(() => despesas.filter((d) => d.data?.startsWith(monthFilter)), [despesas, monthFilter]);
 
   const totalReceitas = vendasMes.reduce((s, v) => s + Number(v.valor || 0), 0);
-  const totalDespesas = despesasMes.reduce((s, d) => s + Number(d.valor || 0), 0);
-  const saldo = totalReceitas - totalDespesas;
+  const custosVendasMes = custosDasVendas(vendasMes).total;
+  // Despesas do mês = despesas lançadas na aba Despesas + custos lançados nas vendas.
+  const totalDespesas = despesasMes.reduce((s, d) => s + Number(d.valor || 0), 0) + custosVendasMes;
+  // Saldo = o que entrou de fato (já com descontos) − despesas e custos das vendas.
+  const saldo = vendasMes.reduce((s, v) => s + valorRecebido(v), 0) - totalDespesas;
   const pendentes = vendasMes.filter((v) => v.status === "pendente").reduce((s, v) => s + Number(v.valor || 0), 0);
   const paresMes = somaPares(vendasMes);
   const lucroVendasMes = somaLucro(vendasMes);
-  const custosVendasMes = vendasMes.reduce((s, v) => s + Number(v.custo || 0) + Number(v.custoEntrega || 0), 0);
 
   const alvoMes = metas[monthFilter] || METAS_PADRAO[monthFilter] || null;
   const analiseMeta = useMemo(
@@ -2385,7 +2528,9 @@ function PrimeStepApp() {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
       const receita = vendas.filter((v) => v.data?.startsWith(key)).reduce((s, v) => s + Number(v.valor || 0), 0);
-      const despesa = despesas.filter((v) => v.data?.startsWith(key)).reduce((s, v) => s + Number(v.valor || 0), 0);
+      const despesa =
+        despesas.filter((v) => v.data?.startsWith(key)).reduce((s, v) => s + Number(v.valor || 0), 0) +
+        custosDasVendas(vendas.filter((v) => v.data?.startsWith(key))).total;
       arr.push({ mes: MESES[d.getMonth()], receita, despesa });
     }
     return arr;
@@ -2464,10 +2609,13 @@ function PrimeStepApp() {
       const cat = d.categoria || "Outros";
       totals[cat] = (totals[cat] || 0) + Number(d.valor || 0);
     });
+    const cv = custosDasVendas(despesaScope === "mes" ? vendasMes : vendas);
+    if (cv.terceirizacao) totals["Terceirização e produtos (vendas)"] = (totals["Terceirização e produtos (vendas)"] || 0) + cv.terceirizacao;
+    if (cv.entregas) totals["Entregas (vendas)"] = (totals["Entregas (vendas)"] || 0) + cv.entregas;
     return Object.entries(totals)
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value);
-  }, [despesas, despesasMes, despesaScope]);
+  }, [despesas, despesasMes, despesaScope, vendas, vendasMes]);
   const maiorCategoriaGasto = despesaPieData.length ? despesaPieData[0] : null;
   const totalDespesaPie = despesaPieData.reduce((s, x) => s + x.value, 0);
 
@@ -2483,7 +2631,7 @@ function PrimeStepApp() {
         const vs = vendas.filter((v) => v.data?.startsWith(key));
         const ds = despesas.filter((d) => d.data?.startsWith(key));
         const receita = vs.reduce((s, v) => s + Number(v.valor || 0), 0);
-        const despesa = ds.reduce((s, d) => s + Number(d.valor || 0), 0);
+        const despesa = ds.reduce((s, d) => s + Number(d.valor || 0), 0) + custosDasVendas(vs).total;
         const qtdServicos = vs.reduce((s, v) => s + getItens(v).length, 0);
         return { key, label: monthLabel(key), receita, despesa, saldo: receita - despesa, qtdServicos, qtdVendas: vs.length, qtdPares: somaPares(vs) };
       });
@@ -2560,7 +2708,9 @@ function PrimeStepApp() {
     const meses = Array.from(set).sort(); // ordem cronológica
     const linhas = meses.map((key) => {
       const receita = vendas.filter((v) => v.data?.startsWith(key)).reduce((s, v) => s + Number(v.valor || 0), 0);
-      const despesa = despesas.filter((d) => d.data?.startsWith(key)).reduce((s, d) => s + Number(d.valor || 0), 0);
+      const despesa =
+        despesas.filter((d) => d.data?.startsWith(key)).reduce((s, d) => s + Number(d.valor || 0), 0) +
+        custosDasVendas(vendas.filter((v) => v.data?.startsWith(key))).total;
       return { key, label: monthLabel(key), receita, despesa, saldo: receita - despesa };
     });
     const totalReceitaGeral = linhas.reduce((s, l) => s + l.receita, 0);
@@ -2677,7 +2827,7 @@ function PrimeStepApp() {
             {/* Stats */}
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
               <StatCard label="Receitas do mês" value={formatBRL(totalReceitas)} icon={TrendingUp} tone="up" />
-              <StatCard label="Despesas do mês" value={formatBRL(totalDespesas)} icon={TrendingDown} tone="down" />
+              <StatCard label="Despesas do mês (com custos das vendas)" value={formatBRL(totalDespesas)} icon={TrendingDown} tone="down" />
               <StatCard label="Saldo" value={formatBRL(saldo)} icon={Wallet} tone={saldo >= 0 ? "up" : "down"} />
               <StatCard label="A receber (pendente)" value={formatBRL(pendentes)} icon={Clock} />
               <StatCard label="Pares feitos no mês" value={String(paresMes)} icon={Check} />
@@ -2774,6 +2924,14 @@ function PrimeStepApp() {
 
             {tab === "analises" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 4 }}>
+                <ResumoDoMes
+                  vendas={vendas}
+                  despesas={despesas}
+                  clientes={clientes}
+                  mesKey={monthFilter}
+                  mesLabel={monthLabel(monthFilter)}
+                  alvo={alvoMes}
+                />
                 {/* De onde vêm os clientes */}
                 <LedgerCard style={{ padding: "16px 16px 14px" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 8 }}>
@@ -3422,6 +3580,19 @@ function PrimeStepApp() {
 
             {/* List */}
             {tab !== "analises" && tab !== "historico" && tab !== "assinaturas" && tab !== "operacional" && tab !== "calendario" && tab !== "meta" && tab !== "clientes" && (
+            <>
+            {tab === "despesas" && (() => {
+              const cv = custosDasVendas(vendasMes);
+              return (
+                <LedgerCard style={{ padding: "12px 14px", marginBottom: 10, fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--ink)", lineHeight: 1.5 }}>
+                  <strong>Custos lançados nas vendas em {monthLabel(monthFilter)}: {formatBRL(cv.total)}</strong>
+                  <span style={{ color: "var(--muted)" }}> (terceirização e produtos {formatBRL(cv.terceirizacao)} · entregas {formatBRL(cv.entregas)})</span>
+                  <div style={{ color: "var(--muted)", marginTop: 2 }}>
+                    Já entram no total de despesas e no saldo. Não lance terceirização nem entrega aqui de novo, senão contam duas vezes.
+                  </div>
+                </LedgerCard>
+              );
+            })()}
             <LedgerCard style={{ padding: "6px 14px 4px" }}>
               {tab !== "despesas" ? (
                 vendasMes.length === 0 ? (
@@ -3491,6 +3662,7 @@ function PrimeStepApp() {
                   ))
               )}
             </LedgerCard>
+            </>
             )}
           </>
         )}
