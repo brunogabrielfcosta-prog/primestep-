@@ -207,6 +207,20 @@ function valorRecebido(v) {
   return v.valorPago != null ? Number(v.valorPago) : Number(v.valor || 0);
 }
 // Lucro real = valor pago pelo cliente − custo do serviço − custo da entrega.
+// Quanto ainda falta o cliente pagar: tudo, se pendente; o restante, se pagou só uma parte (sinal).
+function faltaReceber(v) {
+  if (v.status === "pendente") return valorRecebido(v);
+  if (v.status === "parcial") return Math.max(0, valorRecebido(v) - Number(v.entrada || 0));
+  return 0;
+}
+function somaFalta(lista) {
+  return lista.reduce((s, v) => s + faltaReceber(v), 0);
+}
+function labelStatus(v) {
+  if (v.status === "pago") return "Pago";
+  if (v.status === "parcial") return `Pagou ${formatBRL(Number(v.entrada || 0))} · falta ${formatBRL(faltaReceber(v))}`;
+  return "Pendente";
+}
 function lucroDaVenda(v) {
   return valorRecebido(v) - Number(v.custo || 0) - Number(v.custoEntrega || 0);
 }
@@ -235,6 +249,7 @@ function rowToVenda(row) {
     custo: row.custo != null ? Number(row.custo) : null,
     custoEntrega: row.custo_entrega != null ? Number(row.custo_entrega) : null,
     valorPago: row.valor_pago != null ? Number(row.valor_pago) : null,
+    entrada: row.valor_entrada != null ? Number(row.valor_entrada) : null,
   };
 }
 function rowToCliente(r) {
@@ -346,12 +361,15 @@ async function upsertVenda(v) {
     custo_entrega: v.custoEntrega != null ? v.custoEntrega : null,
     valor_pago: v.valorPago != null ? v.valorPago : null,
   };
+  const comEntrada = { ...completo, valor_entrada: v.entrada != null ? v.entrada : null };
   // Tenta salvar tudo. Se alguma coluna nova ainda não existir no banco, salva sem ela
   // (para não perder a venda) e avisa uma vez.
-  for (const payload of [completo, comCliente, comOrigem, base]) {
+  // Venda com sinal sem a coluna no banco: não salva pela metade, para não perder o valor do sinal.
+  const tentativas = v.status === "parcial" ? [comEntrada] : [comEntrada, completo, comCliente, comOrigem, base];
+  for (const payload of tentativas) {
     const { error } = await supabase.from("vendas").upsert(payload);
     if (!error) {
-      if (payload !== completo && !avisoColunasMostrado) {
+      if (payload !== comEntrada && payload !== completo && !avisoColunasMostrado) {
         avisoColunasMostrado = true;
         window.alert(
           "A venda foi salva, mas parte das informações novas (custos, ficha do cliente, origem ou pares) não foi gravada: falta rodar o último comando SQL no Supabase."
@@ -364,6 +382,12 @@ async function upsertVenda(v) {
       avisarErro("salvar a venda", error);
       return;
     }
+  }
+  if (v.status === "parcial") {
+    window.alert(
+      "A venda com sinal não foi salva: falta criar no Supabase a coluna do valor do sinal. Rode no SQL Editor:\n\nalter table vendas add column if not exists valor_entrada numeric;"
+    );
+    return;
   }
   avisarErro("salvar a venda", { message: "colunas ausentes na tabela de vendas" });
 }
@@ -494,6 +518,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
   const [custoEntrega, setCustoEntrega] = useState(fmtCampo(initial?.custoEntrega));
   const [valorPago, setValorPago] = useState(fmtCampo(initial?.valorPago));
   const [valorPagoManual, setValorPagoManual] = useState(initial?.valorPago != null);
+  const [entrada, setEntrada] = useState(fmtCampo(initial?.entrada));
   const [itens, setItens] = useState(() => {
     if (!isVenda) return [];
     const source = initial?.itens?.length ? initial.itens : initial?.servico ? [{ servico: initial.servico, valor: initial.valor }] : null;
@@ -591,13 +616,26 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
         valor: itemSubtotal(it),
       }));
       const totalClean = itensClean.reduce((s, it) => s + it.valor, 0);
+      const valorFinal = valorPagoManual && valorPago.trim() ? parseValor(valorPago) : totalClean;
+      const entradaNum = parseValor(entrada);
+      if (status === "parcial") {
+        if (entradaNum <= 0) {
+          setError("Informe quanto o cliente já pagou.");
+          return;
+        }
+        if (entradaNum >= valorFinal) {
+          setError("O valor já pago cobre a venda toda. Marque como Pago.");
+          return;
+        }
+      }
       onSave({
         id: initial?.id || uid(), data, cliente: nome.trim(), status, itens: itensClean, valor: totalClean,
         origem: origem || null, pares: paresValor,
         clienteId: clienteId || null, dadosCliente,
         custo: custo.trim() ? parseValor(custo) : null,
         custoEntrega: custoEntrega.trim() ? parseValor(custoEntrega) : null,
-        valorPago: valorPagoManual && valorPago.trim() ? parseValor(valorPago) : totalClean,
+        valorPago: valorFinal,
+        entrada: status === "parcial" ? entradaNum : null,
         assinaturaId: initial?.assinaturaId || null, mesReferencia: initial?.mesReferencia || null,
       });
     } else {
@@ -847,9 +885,34 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                 <Field label="Status do pagamento">
                   <select value={status} onChange={(e) => setStatus(e.target.value)} style={inputStyle}>
                     <option value="pago">Pago</option>
+                    <option value="parcial">Pagou uma parte (sinal)</option>
                     <option value="pendente">Pendente</option>
                   </select>
                 </Field>
+
+                {status === "parcial" && (() => {
+                  const combinado = valorPagoManual ? parseValor(valorPago) : total;
+                  const falta = Math.max(0, combinado - parseValor(entrada));
+                  return (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, alignItems: "end" }}>
+                      <Field label="Quanto já pagou">
+                        <input id="venda-entrada" type="text" inputMode="decimal" value={entrada} onChange={(e) => setEntrada(e.target.value)} placeholder="0,00" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+                      </Field>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingBottom: 8 }}>
+                        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, fontWeight: 600, color: "var(--muted)" }}>Falta receber na entrega</span>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 18, color: "var(--rust)" }}>{formatBRL(falta)}</span>
+                      </div>
+                      <div style={{ gridColumn: "1 / -1", display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button type="button" onClick={() => setEntrada(fmtCampo(Math.round(combinado * 50) / 100))} style={{ border: "1px solid var(--paper-line)", background: "#FFFDF8", borderRadius: 4, padding: "4px 10px", fontSize: 12, cursor: "pointer", color: "var(--ink)" }}>
+                          Metade ({formatBRL(Math.round(combinado * 50) / 100)})
+                        </button>
+                        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", alignSelf: "center" }}>
+                          Quando ela pagar o resto, edite a venda e mude para Pago.
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 4, borderTop: "1px solid var(--paper-line)" }}>
                   <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
@@ -878,7 +941,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                         <Field label="Entrega (custo)">
                           <input id="venda-entrega" type="text" inputMode="decimal" value={custoEntrega} onChange={(e) => setCustoEntrega(e.target.value)} placeholder="0,00" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
                         </Field>
-                        <Field label="Valor pago pelo cliente">
+                        <Field label={status === "pago" ? "Valor pago pelo cliente" : "Valor total combinado"}>
                           <input
                             id="venda-valor-pago"
                             type="text"
@@ -1222,7 +1285,7 @@ function DayDetailModal({ iso, vendasDoDia, onEdit, onDelete, onAddNew, onClose 
                     </div>
                     <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 5, fontSize: 11, fontWeight: 600, color: v.status === "pago" ? "var(--green)" : "var(--rust)" }}>
                       {v.status === "pago" ? <Check size={11} /> : <Clock size={11} />}
-                      {v.status === "pago" ? "Pago" : "Pendente"}
+                      {labelStatus(v)}
                     </div>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
@@ -1285,7 +1348,7 @@ function analisarMeta(vendas, mesKey, alvo, hoje) {
 
   const doMes = vendas.filter((v) => v.data?.startsWith(mesKey));
   const faturado = somaValor(doMes);
-  const pendente = somaValor(doMes.filter((v) => v.status === "pendente"));
+  const pendente = somaFalta(doMes);
   const avulsas = doMes.filter((v) => !v.assinaturaId);
   const receitaAvulsa = somaValor(avulsas);
   const paresAvulsa = somaPares(avulsas);
@@ -1992,12 +2055,12 @@ function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSem
   }
 
   // 3. Cobranças pendentes
-  const pendentes = vendas.filter((v) => v.status === "pendente").sort((x, y) => Number(y.valor) - Number(x.valor));
+  const pendentes = vendas.filter((v) => faltaReceber(v) > 0).sort((x, y) => faltaReceber(y) - faltaReceber(x));
   if (pendentes.length) {
-    const nomes = pendentes.slice(0, 3).map((v) => `${v.cliente} (${formatBRL(v.valor)})`).join(", ");
+    const nomes = pendentes.slice(0, 3).map((v) => `${v.cliente} (${formatBRL(faltaReceber(v))})`).join(", ");
     itens.push({
       tom: "atencao",
-      texto: `${formatBRL(somaValor(pendentes))} para receber em ${pendentes.length} venda${pendentes.length === 1 ? "" : "s"}. Cobrar: ${nomes}${pendentes.length > 3 ? " e outros" : ""}.`,
+      texto: `${formatBRL(somaFalta(pendentes))} para receber em ${pendentes.length} venda${pendentes.length === 1 ? "" : "s"}. Cobrar: ${nomes}${pendentes.length > 3 ? " e outros" : ""}.`,
     });
   }
 
@@ -2126,7 +2189,7 @@ function ResumoDoMes({ vendas, despesas, clientes, mesKey, mesLabel, alvo }) {
   avulsas.forEach((v) => (v.itens || []).forEach((it) => { servicos[it.servico] = (servicos[it.servico] || 0) + Number(it.valor || 0); }));
   const topServico = Object.entries(servicos).sort((a, b) => b[1] - a[1])[0];
   const semCusto = avulsas.filter((v) => v.custo == null && v.custoEntrega == null).length;
-  const pendente = somaValor(vs.filter((v) => v.status === "pendente"));
+  const pendente = somaFalta(vs);
   const varPct = (a, b) => (b ? (a / b - 1) * 100 : null);
 
   const linhas = [
@@ -2507,7 +2570,7 @@ function PrimeStepApp() {
   const totalDespesas = despesasMes.reduce((s, d) => s + Number(d.valor || 0), 0) + custosVendasMes;
   // Saldo = o que entrou de fato (já com descontos) − despesas e custos das vendas.
   const saldo = vendasMes.reduce((s, v) => s + valorRecebido(v), 0) - totalDespesas;
-  const pendentes = vendasMes.filter((v) => v.status === "pendente").reduce((s, v) => s + Number(v.valor || 0), 0);
+  const pendentes = somaFalta(vendasMes);
   const paresMes = somaPares(vendasMes);
   const lucroVendasMes = somaLucro(vendasMes);
 
@@ -3634,7 +3697,7 @@ function PrimeStepApp() {
                           }}
                         >
                           {v.status === "pago" ? <Check size={12} /> : <Clock size={12} />}
-                          {v.status === "pago" ? "Pago" : "Pendente"}
+                          {labelStatus(v)}
                         </span>
                         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: "var(--green)", textAlign: "right" }}>
                           {formatBRL(v.valor)}
