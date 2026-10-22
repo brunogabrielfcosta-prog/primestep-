@@ -51,7 +51,7 @@ const CATALOGO_SERVICOS = [
   },
 ];
 
-const CATEGORIAS_DESPESA = ["Produtos e insumos", "Aluguel", "Salários", "Marketing", "Impostos", "Equipamentos", "Outros"];
+const CATEGORIAS_DESPESA = ["Produtos e insumos", "Entregas", "Tráfego pago", "Aluguel", "Salários", "Marketing", "Impostos", "Equipamentos", "Outros"];
 
 // De onde o cliente veio. Para mudar as opções, é só editar esta lista.
 const ORIGENS_CLIENTE = ["Tráfego", "Instagram", "Facebook", "WhatsApp", "Pessoal", "Indicação"];
@@ -229,6 +229,24 @@ function custosDasVendas(lista) {
   const terceirizacao = lista.reduce((s, v) => s + Number(v.custo || 0), 0);
   const entregas = lista.reduce((s, v) => s + Number(v.custoEntrega || 0), 0);
   return { terceirizacao, entregas, total: terceirizacao + entregas };
+}
+// Despesas de uma categoria (ex.: "Entregas", "Tráfego pago").
+function somaCategoria(despesasLista, categoria) {
+  return despesasLista.filter((d) => d.categoria === categoria).reduce((s, d) => s + Number(d.valor || 0), 0);
+}
+// Tráfego pago no mês: quanto foi investido e o que as vendas com origem Tráfego trouxeram.
+function analiseTrafego(vendasMes, despesasMes) {
+  const investido = somaCategoria(despesasMes, "Tráfego pago");
+  const vs = vendasMes.filter((v) => v.origem === "Tráfego" && !v.assinaturaId);
+  const clientes = contarClientes(vs);
+  const faturado = vs.reduce((s, v) => s + valorRecebido(v), 0);
+  const lucroVendas = somaLucro(vs);
+  return {
+    investido, vendas: vs.length, clientes, faturado, lucroVendas,
+    resultado: lucroVendas - investido,
+    custoPorCliente: clientes ? investido / clientes : null,
+    retorno: investido > 0 ? faturado / investido : null,
+  };
 }
 function somaLucro(lista) {
   return lista.reduce((s, v) => s + lucroDaVenda(v), 0);
@@ -2155,9 +2173,12 @@ function ResumoDoMes({ vendas, despesas, clientes, mesKey, mesLabel, alvo }) {
     const recebido = vs.reduce((s, v) => s + valorRecebido(v), 0);
     const descontos = Math.max(0, receitas - recebido);
     const cv = custosDasVendas(vs);
-    const outras = ds.reduce((s, d) => s + Number(d.valor || 0), 0);
-    const lucro = recebido - cv.total - outras;
-    return { vs, receitas, recebido, descontos, cv, outras, lucro, margem: recebido > 0 ? (lucro / recebido) * 100 : 0 };
+    const todasDespesas = ds.reduce((s, d) => s + Number(d.valor || 0), 0);
+    const entregasDesp = somaCategoria(ds, "Entregas");
+    const trafego = somaCategoria(ds, "Tráfego pago");
+    const outras = todasDespesas - entregasDesp - trafego;
+    const lucro = recebido - cv.total - todasDespesas;
+    return { vs, receitas, recebido, descontos, cv, entregas: cv.entregas + entregasDesp, trafego, outras, lucro, margem: recebido > 0 ? (lucro / recebido) * 100 : 0 };
   }
   const atual = calcular(mesKey);
   const anterior = calcular(prevKey);
@@ -2196,7 +2217,8 @@ function ResumoDoMes({ vendas, despesas, clientes, mesKey, mesLabel, alvo }) {
     ["Faturamento", formatBRL(atual.receitas), "var(--ink)"],
     ...(atual.descontos > 0.009 ? [["(−) Descontos", formatBRL(atual.descontos), "var(--rust)"]] : []),
     ["(−) Terceirização e produtos", formatBRL(atual.cv.terceirizacao), "var(--rust)"],
-    ["(−) Entregas", formatBRL(atual.cv.entregas), "var(--rust)"],
+    ["(−) Entregas", formatBRL(atual.entregas), "var(--rust)"],
+    ...(atual.trafego > 0 ? [["(−) Tráfego pago", formatBRL(atual.trafego), "var(--rust)"]] : []),
     ["(−) Outras despesas", formatBRL(atual.outras), "var(--rust)"],
   ];
 
@@ -2234,7 +2256,7 @@ function ResumoDoMes({ vendas, despesas, clientes, mesKey, mesLabel, alvo }) {
   return (
     <LedgerCard style={{ padding: "16px 16px 14px" }}>
       <div style={{ ...rotulo, marginBottom: 12 }}>Resumo do mês — {mesLabel}</div>
-      {vs.length === 0 && atual.outras === 0 ? (
+      {vs.length === 0 && atual.outras + atual.trafego + atual.entregas === 0 ? (
         <div style={{ fontFamily: "Inter, sans-serif", fontSize: 13.5, color: "var(--muted)" }}>Nenhum lançamento neste mês.</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -2276,6 +2298,76 @@ function ResumoDoMes({ vendas, despesas, clientes, mesKey, mesLabel, alvo }) {
   );
 }
 
+// ---------- Tráfego pago do mês ----------
+function TrafegoDoMes({ vendas, despesas, mesKey, mesLabel }) {
+  const doMes = (lista, k) => lista.filter((x) => x.data?.startsWith(k));
+  const [y, m] = mesKey.split("-").map(Number);
+  const prev = new Date(y, m - 2, 1);
+  const prevKey = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+  const t = analiseTrafego(doMes(vendas, mesKey), doMes(despesas, mesKey));
+  const a = analiseTrafego(doMes(vendas, prevKey), doMes(despesas, prevKey));
+  const rotulo = { fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 };
+  const fmtX = (n) => (n == null ? "—" : `${n.toFixed(1).replace(".", ",")}x`);
+
+  const kpis = [
+    ["Investido", formatBRL(t.investido), "var(--rust)"],
+    ["Clientes fechados", String(t.clientes), "var(--ink)"],
+    ["Custo por cliente", t.custoPorCliente == null ? "—" : formatBRL(t.custoPorCliente), "var(--ink)"],
+    ["Faturou", formatBRL(t.faturado), "var(--green)"],
+    ["Retorno por R$ 1", fmtX(t.retorno), t.retorno == null ? "var(--ink)" : t.retorno >= 1 ? "var(--green)" : "var(--rust)"],
+    ["Resultado", formatBRL(t.resultado), t.resultado >= 0 ? "var(--green)" : "var(--rust)"],
+  ];
+
+  const leitura = [];
+  if (t.investido === 0 && t.vendas === 0) {
+    leitura.push({ tom: "info", texto: "Nenhum investimento nem venda de tráfego neste mês. Lance o valor dos anúncios em Despesas, na categoria Tráfego pago, e marque a origem Tráfego nas vendas que vierem dos anúncios." });
+  } else {
+    if (t.investido === 0) leitura.push({ tom: "atencao", texto: `${t.vendas} venda${t.vendas === 1 ? "" : "s"} de tráfego, mas nenhum investimento lançado. Lance o valor dos anúncios em Despesas (categoria Tráfego pago) para calcular o retorno.` });
+    if (t.investido > 0 && t.clientes === 0) leitura.push({ tom: "atencao", texto: `${formatBRL(t.investido)} investidos e nenhuma venda com origem Tráfego. Se algum cliente veio do anúncio, marque a origem Tráfego na venda.` });
+    if (t.investido > 0 && t.clientes > 0) {
+      leitura.push({
+        tom: t.resultado >= 0 ? "ok" : "atencao",
+        texto: t.resultado >= 0
+          ? `O tráfego se pagou: as vendas deram ${formatBRL(t.lucroVendas)} de lucro, ${formatBRL(t.resultado)} a mais que o investido. Cada R$ 1 em anúncio virou ${formatBRL(t.retorno)} em vendas.`
+          : `O tráfego ainda não se pagou: as vendas deram ${formatBRL(t.lucroVendas)} de lucro contra ${formatBRL(t.investido)} investidos (faltam ${formatBRL(-t.resultado)}). Lembre que cliente que volta paga o anúncio de novo nos próximos meses.`,
+      });
+    }
+    if (a.custoPorCliente != null && t.custoPorCliente != null) {
+      const v = (t.custoPorCliente / a.custoPorCliente - 1) * 100;
+      leitura.push({ tom: v <= 0 ? "ok" : "atencao", texto: `Custo por cliente ${v <= 0 ? "caiu" : "subiu"} ${fmtPct(Math.abs(v))} em relação ao mês anterior (${formatBRL(a.custoPorCliente)}).` });
+    }
+  }
+  const cor = { atencao: "var(--rust)", ok: "var(--green)", info: "var(--ink)" };
+  const icone = { atencao: "⚠️", ok: "✅", info: "💡" };
+
+  return (
+    <LedgerCard style={{ padding: "16px 16px 14px" }}>
+      <div style={{ ...rotulo, marginBottom: 12 }}>Tráfego pago — {mesLabel}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 12, marginBottom: leitura.length ? 14 : 0 }}>
+        {kpis.map(([l, v, c]) => (
+          <div key={l}>
+            <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", marginBottom: 2 }}>{l}</div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, fontWeight: 700, color: c }}>{v}</div>
+          </div>
+        ))}
+      </div>
+      {leitura.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {leitura.map((d, i) => (
+            <div key={i} style={{ display: "flex", gap: 9, alignItems: "flex-start", fontFamily: "Inter, sans-serif", fontSize: 13, lineHeight: 1.5, color: "var(--ink)", paddingLeft: 10, borderLeft: `3px solid ${cor[d.tom]}` }}>
+              <span>{icone[d.tom]}</span>
+              <span>{d.texto}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.45 }}>
+        Resultado = lucro das vendas que vieram do tráfego (já sem custos e entregas) − o que foi investido em anúncios.
+      </div>
+    </LedgerCard>
+  );
+}
+
 // ---------- Ledger row list ----------
 function LedgerRow({ children, onEdit, onDelete }) {
   return (
@@ -2296,9 +2388,11 @@ function LedgerRow({ children, onEdit, onDelete }) {
         <button onClick={onEdit} title="Editar" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
           <Pencil size={14} />
         </button>
-        <button onClick={onDelete} title="Excluir" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 4 }}>
-          <Trash2 size={14} />
-        </button>
+        {onDelete && (
+          <button onClick={onDelete} title="Excluir" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 4 }}>
+            <Trash2 size={14} />
+          </button>
+        )}
       </div>
     </div>
   );
@@ -2674,7 +2768,8 @@ function PrimeStepApp() {
     });
     const cv = custosDasVendas(despesaScope === "mes" ? vendasMes : vendas);
     if (cv.terceirizacao) totals["Terceirização e produtos (vendas)"] = (totals["Terceirização e produtos (vendas)"] || 0) + cv.terceirizacao;
-    if (cv.entregas) totals["Entregas (vendas)"] = (totals["Entregas (vendas)"] || 0) + cv.entregas;
+    // Entrega lançada na venda soma junto com as despesas da categoria Entregas.
+    if (cv.entregas) totals["Entregas"] = (totals["Entregas"] || 0) + cv.entregas;
     return Object.entries(totals)
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value);
@@ -2995,6 +3090,7 @@ function PrimeStepApp() {
                   mesLabel={monthLabel(monthFilter)}
                   alvo={alvoMes}
                 />
+                <TrafegoDoMes vendas={vendas} despesas={despesas} mesKey={monthFilter} mesLabel={monthLabel(monthFilter)} />
                 {/* De onde vêm os clientes */}
                 <LedgerCard style={{ padding: "16px 16px 14px" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 8 }}>
@@ -3646,12 +3742,16 @@ function PrimeStepApp() {
             <>
             {tab === "despesas" && (() => {
               const cv = custosDasVendas(vendasMes);
+              const entregasAqui = despesasMes.filter((d) => d.categoria === "Entregas").reduce((s, d) => s + Number(d.valor || 0), 0);
               return (
                 <LedgerCard style={{ padding: "12px 14px", marginBottom: 10, fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--ink)", lineHeight: 1.5 }}>
-                  <strong>Custos lançados nas vendas em {monthLabel(monthFilter)}: {formatBRL(cv.total)}</strong>
-                  <span style={{ color: "var(--muted)" }}> (terceirização e produtos {formatBRL(cv.terceirizacao)} · entregas {formatBRL(cv.entregas)})</span>
+                  <strong>Entregas em {monthLabel(monthFilter)}: {formatBRL(cv.entregas + entregasAqui)}</strong>
+                  <span style={{ color: "var(--muted)" }}> ({formatBRL(cv.entregas)} lançadas nas vendas · {formatBRL(entregasAqui)} lançadas aqui)</span>
+                  <div style={{ marginTop: 4 }}>
+                    <strong>Terceirização e produtos das vendas: {formatBRL(cv.terceirizacao)}</strong>
+                  </div>
                   <div style={{ color: "var(--muted)", marginTop: 2 }}>
-                    Já entram no total de despesas e no saldo. Não lance terceirização nem entrega aqui de novo, senão contam duas vezes.
+                    A entrega lançada na venda aparece sozinha na lista abaixo, na categoria Entregas, e já entra no total do mês. Não lance de novo aqui, senão conta duas vezes. Use a categoria Entregas aqui só para entrega que não é de uma venda (ex.: diária do entregador, gasolina).
                   </div>
                 </LedgerCard>
               );
@@ -3705,18 +3805,33 @@ function PrimeStepApp() {
                       </LedgerRow>
                     ))
                 )
-              ) : despesasMes.length === 0 ? (
+              ) : despesasMes.length === 0 && !vendasMes.some((v) => Number(v.custoEntrega || 0) > 0) ? (
                 <div style={{ padding: "26px 6px", textAlign: "center", color: "var(--muted)", fontFamily: "Inter, sans-serif", fontSize: 13.5 }}>
                   Nenhuma despesa registrada neste mês.
                 </div>
               ) : (
-                despesasMes
-                  .slice()
+                [
+                  ...despesasMes,
+                  // Entregas lançadas nas vendas entram na lista como despesa da categoria Entregas.
+                  ...vendasMes
+                    .filter((v) => Number(v.custoEntrega || 0) > 0)
+                    .map((v) => ({
+                      id: `entrega-${v.id}`, data: v.data, descricao: `Entrega · ${v.cliente}`, categoria: "Entregas",
+                      valor: Number(v.custoEntrega), vendaOrigem: v,
+                    })),
+                ]
                   .sort((a, b) => (a.data < b.data ? 1 : -1))
                   .map((d) => (
-                    <LedgerRow key={d.id} onEdit={() => setModal({ type: "despesa", initial: d })} onDelete={() => deleteDespesa(d.id)}>
+                    <LedgerRow
+                      key={d.id}
+                      onEdit={() => (d.vendaOrigem ? setModal({ type: "venda", initial: d.vendaOrigem }) : setModal({ type: "despesa", initial: d }))}
+                      onDelete={d.vendaOrigem ? null : () => deleteDespesa(d.id)}
+                    >
                       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5, color: "var(--muted)" }}>{formatDateBR(d.data)}</span>
-                      <span style={{ color: "var(--ink)" }}>{d.descricao}</span>
+                      <span style={{ color: "var(--ink)" }}>
+                        {d.descricao}
+                        {d.vendaOrigem && <span style={{ display: "block", fontSize: 11.5, color: "var(--muted)" }}>lançada na venda · para mudar, edite a venda</span>}
+                      </span>
                       <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)" }}>{d.categoria}</span>
                       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: "var(--rust)", textAlign: "right" }}>
                         {formatBRL(d.valor)}
