@@ -45,6 +45,31 @@ const CATALOGO_SERVICOS = [
     descricao: "Recuperação de solado amarelado, reparos no couro/camurça e retoques de pintura para devolver a aparência original.",
   },
   {
+    nome: "Colagem de solado",
+    valor: 120,
+    descricao: "Recolagem do solado que está descolando, com cola própria para calçados e prensagem.",
+  },
+  {
+    nome: "Recuperação de solado",
+    valor: 120,
+    descricao: "Recuperação do solado desgastado ou danificado para voltar a firmeza e a aparência.",
+  },
+  {
+    nome: "Troca da borracha do solado",
+    valor: 120,
+    descricao: "Substituição da borracha gasta do solado por uma nova.",
+  },
+  {
+    nome: "Pintura",
+    valor: 50,
+    descricao: "Pintura ou retoque de cor no tênis.",
+  },
+  {
+    nome: "Tingir roupa",
+    valor: 50,
+    descricao: "Tingimento de peça de roupa (camiseta, moletom, calça). Não conta como par de tênis.",
+  },
+  {
     nome: "Taxa de Entrega",
     valor: 15,
     descricao: "Busca e/ou entrega do par na casa do cliente. Valor base — ajuste conforme a distância.",
@@ -60,7 +85,22 @@ const CATEGORIAS_DESPESA = ["Produtos e insumos", "Entregas", "Tráfego pago", "
 const ORIGENS_CLIENTE = ["Tráfego", "Instagram", "Facebook", "WhatsApp", "Pessoal", "Indicação"];
 
 // Serviços que não representam um par de tênis (não entram na sugestão de pares).
-const SERVICOS_SEM_PAR = ["Taxa de Entrega"];
+const SERVICOS_SEM_PAR = ["Taxa de Entrega", "Tingir roupa"];
+
+// Junta no mesmo serviço os nomes digitados de jeitos diferentes ("tingir roupa", "TINGIR moletom"...).
+function semAcento(t) {
+  return String(t || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+function nomeServicoPadrao(nome) {
+  const n = semAcento(nome);
+  if (!n) return "Outro";
+  const doCatalogo = CATALOGO_SERVICOS.find((s) => semAcento(s.nome) === n);
+  if (doCatalogo) return doCatalogo.nome;
+  if (/^ting/.test(n)) return "Tingir roupa";
+  if (/^colagem( de)? solado$/.test(n)) return "Colagem de solado";
+  if (/^pintura$/.test(n)) return "Pintura";
+  return String(nome).trim();
+}
 
 // Metas de faturamento por mês (AAAA-MM). As metas salvas pelo próprio sistema
 // (botão "Editar meta", tabela "metas" no Supabase) têm prioridade sobre estas.
@@ -2314,7 +2354,7 @@ function ResumoDoMes({ vendas, despesas, clientes, mesKey, mesLabel, alvo }) {
   };
   const origens = somaPor((v) => v.origem);
   const servicos = {};
-  avulsas.forEach((v) => (v.itens || []).forEach((it) => { servicos[it.servico] = (servicos[it.servico] || 0) + Number(it.valor || 0); }));
+  avulsas.forEach((v) => (v.itens || []).forEach((it) => { const k = nomeServicoPadrao(it.servico); servicos[k] = (servicos[k] || 0) + Number(it.valor || 0); }));
   const topServico = Object.entries(servicos).sort((a, b) => b[1] - a[1])[0];
   const semCusto = avulsas.filter((v) => v.custo == null && v.custoEntrega == null).length;
   const pendente = somaFalta(vs);
@@ -2975,7 +3015,7 @@ function PrimeStepApp() {
     const totals = {};
     source.forEach((v) => {
       getItens(v).forEach((it) => {
-        const nome = it.servico || "Outro";
+        const nome = nomeServicoPadrao(it.servico);
         totals[nome] = (totals[nome] || 0) + Number(it.valor || 0);
       });
     });
