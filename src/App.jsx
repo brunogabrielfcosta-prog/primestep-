@@ -138,14 +138,30 @@ const DIAS_SEMANA = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
 const DIAS_SEMANA_EXT = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
 
 // Etapas do fluxo operacional: do recebimento do tênis até a liberação para entrega.
+// Onde está cada par: aqui na PrimeStep, no terceirizado ou já entregue ao cliente.
 const ETAPAS_PEDIDO = [
-  { id: "fotos_antes", label: "Fotos do antes", color: "#8A8375" },
-  { id: "higienizacao", label: "Higienização", color: "#5B7A8C" },
-  { id: "secagem", label: "Secagem", color: "#C7A96B" },
-  { id: "acabamento", label: "Acabamento", color: "#A24632" },
-  { id: "fotos_depois", label: "Fotos do depois", color: "#6B7A8F" },
-  { id: "liberado", label: "Liberado p/ entrega", color: "#4B6552" },
+  { id: "primestep", label: "Aqui na PrimeStep", color: "#5B7A8C" },
+  { id: "terceirizado", label: "No terceirizado", color: "#C7A96B" },
+  { id: "entregue", label: "Entregue", color: "#4B6552" },
 ];
+function paresDoPedido(p) {
+  return p.pares != null ? Number(p.pares) || 0 : 1;
+}
+function resumoServicos(v) {
+  return (v.itens || [])
+    .filter((it) => !["Taxa de Entrega"].includes(it.servico))
+    .map((it) => (it.quantidade > 1 ? `${it.servico} (x${it.quantidade})` : it.servico))
+    .join(", ");
+}
+function pedidoDaVenda(v, etapa) {
+  const hoje = todayStr();
+  return {
+    id: uid(), vendaId: v.id, cliente: v.cliente, tenis: resumoServicos(v), pares: paresDaVenda(v) || 1,
+    dataEntrada: v.data, etapa, observacoes: "",
+    dataTerceirizado: etapa === "terceirizado" ? hoje : null,
+    dataEntrega: etapa === "entregue" ? hoje : null,
+  };
+}
 
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -418,6 +434,8 @@ function rowToPedido(row) {
   return {
     id: row.id, cliente: row.cliente, tenis: row.tenis, dataEntrada: row.data_entrada,
     etapa: row.etapa, observacoes: row.observacoes || "", dataEntrega: row.data_entrega || null,
+    vendaId: row.venda_id || null, pares: row.pares != null ? Number(row.pares) : null,
+    dataTerceirizado: row.data_terceirizado || null,
   };
 }
 
@@ -547,6 +565,7 @@ async function upsertPedido(p) {
   const { error } = await supabase.from("pedidos").upsert({
     id: p.id, cliente: p.cliente, tenis: p.tenis, data_entrada: p.dataEntrada,
     etapa: p.etapa, observacoes: p.observacoes, data_entrega: p.dataEntrega || null,
+    venda_id: p.vendaId || null, pares: p.pares != null ? p.pares : null, data_terceirizado: p.dataTerceirizado || null,
   });
   if (error) avisarErro("salvar o par em processo", error);
 }
@@ -649,6 +668,8 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
   // Entregador: na venda nova já vem o de sempre; na despesa só preenche se for entrega feita por ele.
   const [entregador, setEntregador] = useState(initial?.entregador || (isVenda && !initial?.id ? ENTREGADOR_PADRAO : ""));
   const nomesEntregadores = [...new Set([ENTREGADOR_PADRAO, ...entregadores].filter(Boolean))];
+  // Venda nova: onde o tênis está agora (entra no controle do Operacional).
+  const [ondeEsta, setOndeEsta] = useState("primestep");
   const [itens, setItens] = useState(() => {
     if (!isVenda) return [];
     const source = initial?.itens?.length ? initial.itens : initial?.servico ? [{ servico: initial.servico, valor: initial.valor }] : null;
@@ -767,6 +788,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
         valorPago: valorFinal,
         entrada: status === "parcial" ? entradaNum : null,
         entregador: parseValor(custoEntrega) > 0 && entregador.trim() ? entregador.trim() : null,
+        ondeEsta: !initial?.id && !initial?.assinaturaId && ondeEsta !== "nenhum" ? ondeEsta : null,
         assinaturaId: initial?.assinaturaId || null, mesReferencia: initial?.mesReferencia || null,
       });
     } else {
@@ -1015,6 +1037,16 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                     </span>
                   </div>
                 </div>
+
+                {!initial?.id && !initial?.assinaturaId && paresValor > 0 && (
+                  <Field label="Onde está o tênis agora?">
+                    <select value={ondeEsta} onChange={(e) => setOndeEsta(e.target.value)} style={inputStyle}>
+                      <option value="primestep">Aqui na PrimeStep</option>
+                      <option value="terceirizado">No terceirizado</option>
+                      <option value="entregue">Já entregue ao cliente</option>
+                    </select>
+                  </Field>
+                )}
 
                 <Field label="Status do pagamento">
                   <select value={status} onChange={(e) => setStatus(e.target.value)} style={inputStyle}>
@@ -1288,6 +1320,7 @@ function PedidoModal({ initial, onSave, onClose }) {
   const [dataEntrada, setDataEntrada] = useState(initial?.dataEntrada || todayStr());
   const [etapa, setEtapa] = useState(initial?.etapa || ETAPAS_PEDIDO[0].id);
   const [observacoes, setObservacoes] = useState(initial?.observacoes || "");
+  const [pares, setPares] = useState(initial?.pares != null ? String(initial.pares) : "1");
   const [error, setError] = useState("");
 
   function handleSubmit(e) {
@@ -1297,7 +1330,7 @@ function PedidoModal({ initial, onSave, onClose }) {
       return;
     }
     if (!tenis.trim()) {
-      setError("Informe o modelo do tênis.");
+      setError("Informe o tênis ou o serviço.");
       return;
     }
     onSave({
@@ -1307,7 +1340,10 @@ function PedidoModal({ initial, onSave, onClose }) {
       dataEntrada,
       etapa,
       observacoes: observacoes.trim(),
-      dataEntrega: etapa === "liberado" ? (initial?.dataEntrega || todayStr()) : null,
+      pares: Math.max(1, parseInt(pares, 10) || 1),
+      vendaId: initial?.vendaId || null,
+      dataTerceirizado: etapa === "terceirizado" ? (initial?.dataTerceirizado || todayStr()) : etapa === "primestep" ? null : initial?.dataTerceirizado || null,
+      dataEntrega: etapa === "entregue" ? (initial?.dataEntrega || todayStr()) : null,
     });
   }
 
@@ -1323,7 +1359,7 @@ function PedidoModal({ initial, onSave, onClose }) {
         <LedgerCard style={{ padding: 22 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
             <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>
-              {initial ? "Editar" : "Novo"} par em processo
+              {initial ? "Editar pedido" : "Novo pedido"}
             </h3>
             <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}>
               <X size={18} />
@@ -1333,13 +1369,16 @@ function PedidoModal({ initial, onSave, onClose }) {
             <Field label="Cliente">
               <input type="text" value={cliente} onChange={(e) => setCliente(e.target.value)} placeholder="Nome do cliente" style={inputStyle} />
             </Field>
-            <Field label="Tênis (modelo)">
-              <input type="text" value={tenis} onChange={(e) => setTenis(e.target.value)} placeholder="Ex.: Nike Air Force 1 branco" style={inputStyle} />
+            <Field label="Tênis / serviço">
+              <input type="text" value={tenis} onChange={(e) => setTenis(e.target.value)} placeholder="Ex.: Air Force branco · Higienização" style={inputStyle} />
+            </Field>
+            <Field label="Quantos pares">
+              <input type="number" min="1" value={pares} onChange={(e) => setPares(e.target.value)} style={{ ...inputStyle, width: 100 }} />
             </Field>
             <Field label="Data de entrada">
               <input type="date" value={dataEntrada} onChange={(e) => setDataEntrada(e.target.value)} style={inputStyle} />
             </Field>
-            <Field label="Etapa atual">
+            <Field label="Onde está">
               <select value={etapa} onChange={(e) => setEtapa(e.target.value)} style={inputStyle}>
                 {ETAPAS_PEDIDO.map((et) => (
                   <option key={et.id} value={et.id}>{et.label}</option>
@@ -2220,14 +2259,17 @@ function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSem
     });
   }
 
-  // 4. Pares em processo e prontos
-  const emProcesso = pedidos.filter((p) => p.etapa !== "liberado");
-  const prontos = pedidos.filter((p) => p.etapa === "liberado" && p.dataEntrega && diasDesde(p.dataEntrega) <= 1);
-  if (emProcesso.length || prontos.length) {
+  // 4. Onde estão os pares que ainda não foram entregues
+  const aqui = pedidos.filter((p) => p.etapa === "primestep");
+  const fora = pedidos.filter((p) => p.etapa === "terceirizado");
+  const foraHaMuito = fora.filter((p) => p.dataTerceirizado && diasDesde(p.dataTerceirizado) > 7);
+  if (aqui.length || fora.length) {
+    const somaP = (l) => l.reduce((s, p) => s + paresDoPedido(p), 0);
     const partes = [];
-    if (emProcesso.length) partes.push(`${labelPares(emProcesso.length)} em processo`);
-    if (prontos.length) partes.push(`${labelPares(prontos.length)} pronto${prontos.length === 1 ? "" : "s"} para entrega (${prontos.slice(0, 3).map((p) => p.cliente).join(", ")}): avise o cliente`);
-    itens.push({ tom: prontos.length ? "atencao" : "info", texto: partes.join(" · ") + "." });
+    if (aqui.length) partes.push(`${labelPares(somaP(aqui))} aqui na PrimeStep`);
+    if (fora.length) partes.push(`${labelPares(somaP(fora))} no terceirizado`);
+    if (foraHaMuito.length) partes.push(`${foraHaMuito.length} pedido${foraHaMuito.length === 1 ? "" : "s"} no terceirizado há mais de 7 dias (${foraHaMuito.slice(0, 3).map((p) => p.cliente).join(", ")})`);
+    itens.push({ tom: foraHaMuito.length ? "atencao" : "info", texto: `Ainda não entregues: ${partes.join(" · ")}.` });
   }
 
   // 5. Aniversariantes
@@ -2442,6 +2484,150 @@ function ResumoDoMes({ vendas, despesas, clientes, mesKey, mesLabel, alvo }) {
         </div>
       )}
     </LedgerCard>
+  );
+}
+
+// ---------- Operacional: onde estão os pares ----------
+function OperacionalTab({ pedidos, vendas, onMover, onEditar, onExcluir, onAdicionarVenda }) {
+  const [verEntregues, setVerEntregues] = useState(false);
+  const rotulo = { fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 };
+  const btn = (primario) => ({
+    padding: "6px 10px", borderRadius: 4, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "Inter, sans-serif",
+    border: primario ? "none" : "1px solid var(--paper-line)", background: primario ? "var(--ink)" : "#FFFDF8", color: primario ? "var(--paper)" : "var(--ink)",
+  });
+  const somaP = (l) => l.reduce((s, p) => s + paresDoPedido(p), 0);
+  const porEntrada = (a, b) => (a.dataEntrada < b.dataEntrada ? -1 : 1);
+  const aqui = pedidos.filter((p) => p.etapa === "primestep").sort(porEntrada);
+  const fora = pedidos.filter((p) => p.etapa === "terceirizado").sort((a, b) => ((a.dataTerceirizado || a.dataEntrada) < (b.dataTerceirizado || b.dataEntrada) ? -1 : 1));
+  const entregues = pedidos.filter((p) => p.etapa === "entregue").sort((a, b) => ((a.dataEntrega || "") < (b.dataEntrega || "") ? 1 : -1));
+  // Etapas antigas (do quadro anterior) contam como "aqui".
+  const antigos = pedidos.filter((p) => !ETAPAS_PEDIDO.some((e) => e.id === p.etapa));
+  const mesAtual = todayStr().slice(0, 7);
+  const entreguesMes = entregues.filter((p) => (p.dataEntrega || "").startsWith(mesAtual));
+  const vendaPorId = Object.fromEntries(vendas.map((v) => [v.id, v]));
+  // Vendas dos últimos 21 dias com pares que ainda não estão no controle.
+  const limite = new Date(); limite.setDate(limite.getDate() - 21);
+  const limiteIso = `${limite.getFullYear()}-${String(limite.getMonth() + 1).padStart(2, "0")}-${String(limite.getDate()).padStart(2, "0")}`;
+  const noControle = new Set(pedidos.map((p) => p.vendaId).filter(Boolean));
+  const foraDoControle = vendas
+    .filter((v) => !v.assinaturaId && v.data >= limiteIso && paresDaVenda(v) > 0 && !noControle.has(v.id))
+    .sort((a, b) => (a.data < b.data ? 1 : -1));
+
+  function Cartao({ p, cor }) {
+    const venda = p.vendaId ? vendaPorId[p.vendaId] : null;
+    const falta = venda ? faltaReceber(venda) : 0;
+    const dias = p.etapa === "terceirizado" && p.dataTerceirizado ? diasDesde(p.dataTerceirizado) : diasDesde(p.dataEntrada);
+    const alerta = p.etapa === "terceirizado" ? dias > 7 : p.etapa === "primestep" ? dias > 5 : false;
+    return (
+      <div style={{ border: "1px solid var(--paper-line)", borderLeft: `3px solid ${cor}`, borderRadius: 5, padding: "10px 12px", background: "#FFFDF8", display: "flex", flexDirection: "column", gap: 6, fontFamily: "Inter, sans-serif" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+          <div>
+            <strong style={{ fontSize: 14, color: "var(--ink)" }}>{p.cliente}</strong>
+            <span style={{ fontSize: 12, color: "var(--ink)", fontWeight: 600, marginLeft: 8 }}>{labelPares(paresDoPedido(p))}</span>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{p.tenis}</div>
+          </div>
+          <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+            <button onClick={() => onEditar(p)} title="Editar" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 2 }}><Pencil size={13} /></button>
+            <button onClick={() => onExcluir(p.id)} title="Excluir" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 2 }}><Trash2 size={13} /></button>
+          </div>
+        </div>
+        <div style={{ fontSize: 11.5, color: alerta ? "var(--rust)" : "var(--muted)", fontWeight: alerta ? 600 : 400 }}>
+          {p.etapa === "entregue"
+            ? `Entregue em ${formatDateBR(p.dataEntrega)}`
+            : p.etapa === "terceirizado"
+            ? `No terceirizado há ${dias} dia${dias === 1 ? "" : "s"}${p.dataTerceirizado ? ` (desde ${formatDateBR(p.dataTerceirizado)})` : ""}`
+            : `Chegou em ${formatDateBR(p.dataEntrada)} · há ${dias} dia${dias === 1 ? "" : "s"}`}
+        </div>
+        {p.observacoes && <div style={{ fontSize: 11.5, color: "var(--ink)", fontStyle: "italic" }}>{p.observacoes}</div>}
+        {p.etapa !== "entregue" && falta > 0.009 && (
+          <div style={{ fontSize: 12, color: "var(--rust)", fontWeight: 600 }}>Cobrar {formatBRL(falta)} na entrega</div>
+        )}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 2 }}>
+          {p.etapa === "primestep" && <button style={btn(false)} onClick={() => onMover(p, "terceirizado")}>Mandei pro terceirizado</button>}
+          {p.etapa === "terceirizado" && <button style={btn(false)} onClick={() => onMover(p, "primestep")}>Voltou pra PrimeStep</button>}
+          {p.etapa !== "entregue" && <button style={btn(true)} onClick={() => onMover(p, "entregue")}>Entreguei ✓</button>}
+          {p.etapa === "entregue" && <button style={btn(false)} onClick={() => onMover(p, "primestep")}>Desfazer entrega</button>}
+        </div>
+      </div>
+    );
+  }
+
+  const Secao = ({ titulo, lista, cor, vazio }) => (
+    <LedgerCard style={{ padding: "14px 16px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: cor }} />
+        <span style={rotulo}>{titulo}</span>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "var(--ink)", fontWeight: 700 }}>{labelPares(somaP(lista))}</span>
+      </div>
+      {lista.length === 0 ? (
+        <div style={{ fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--muted)" }}>{vazio}</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 }}>
+          {lista.map((p) => <Cartao key={p.id} p={p} cor={cor} />)}
+        </div>
+      )}
+    </LedgerCard>
+  );
+
+  const resumo = [
+    ["Aqui na PrimeStep", somaP(aqui) + somaP(antigos), ETAPAS_PEDIDO[0].color],
+    ["No terceirizado", somaP(fora), ETAPAS_PEDIDO[1].color],
+    ["Entregues no mês", somaP(entreguesMes), ETAPAS_PEDIDO[2].color],
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+        {resumo.map(([l, n, c]) => (
+          <LedgerCard key={l} style={{ padding: "12px 12px", borderTop: `3px solid ${c}` }}>
+            <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)" }}>{l}</div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700, color: "var(--ink)" }}>{n}</div>
+            <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, color: "var(--muted)" }}>par{n === 1 ? "" : "es"}</div>
+          </LedgerCard>
+        ))}
+      </div>
+
+      {foraDoControle.length > 0 && (
+        <LedgerCard style={{ padding: "14px 16px", border: "1px solid var(--rust)" }}>
+          <div style={{ ...rotulo, color: "var(--rust)", marginBottom: 4 }}>Vendas recentes fora do controle ({foraDoControle.length})</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+            Diga onde está cada par para ele entrar no controle. Vendas novas já entram sozinhas.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {foraDoControle.map((v) => (
+              <div key={v.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", borderBottom: "1px solid var(--paper-line)", paddingBottom: 8, fontFamily: "Inter, sans-serif" }}>
+                <div style={{ fontSize: 13 }}>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "var(--muted)", marginRight: 8 }}>{formatDateBR(v.data)}</span>
+                  <strong>{v.cliente}</strong> · {labelPares(paresDaVenda(v))}
+                  <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{resumoServicos(v)}</div>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button style={btn(false)} onClick={() => onAdicionarVenda(v, "primestep")}>Está aqui</button>
+                  <button style={btn(false)} onClick={() => onAdicionarVenda(v, "terceirizado")}>No terceirizado</button>
+                  <button style={btn(false)} onClick={() => onAdicionarVenda(v, "entregue")}>Já entregue</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </LedgerCard>
+      )}
+
+      <Secao titulo="Aqui na PrimeStep" lista={[...antigos, ...aqui]} cor={ETAPAS_PEDIDO[0].color} vazio="Nenhum par aqui agora." />
+      <Secao titulo="No terceirizado" lista={fora} cor={ETAPAS_PEDIDO[1].color} vazio="Nenhum par no terceirizado." />
+
+      <LedgerCard style={{ padding: "14px 16px" }}>
+        <button onClick={() => setVerEntregues((x) => !x)} style={{ border: "none", background: "none", padding: 0, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 9, height: 9, borderRadius: "50%", background: ETAPAS_PEDIDO[2].color }} />
+          <span style={rotulo}>Entregues ({entregues.length})</span>
+          <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--muted)", textDecoration: "underline" }}>{verEntregues ? "esconder" : "ver"}</span>
+        </button>
+        {verEntregues && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8, marginTop: 10 }}>
+            {entregues.slice(0, 30).map((p) => <Cartao key={p.id} p={p} cor={ETAPAS_PEDIDO[2].color} />)}
+          </div>
+        )}
+      </LedgerCard>
+    </div>
   );
 }
 
@@ -2823,9 +3009,15 @@ function PrimeStepApp() {
           venda.clienteId = novo.id;
         }
       }
-      entry = venda;
+      const { ondeEsta, ...vendaLimpa } = venda;
+      entry = vendaLimpa;
       const exists = vendas.some((v) => v.id === entry.id);
       persistVendas(exists ? vendas.map((v) => (v.id === entry.id ? entry : v)) : [entry, ...vendas], { type: "upsert", item: entry });
+      // Venda nova com pares: entra no controle do Operacional, no lugar onde o tênis está.
+      if (!exists && ondeEsta && !entry.assinaturaId && paresDaVenda(entry) > 0) {
+        const novo = pedidoDaVenda(entry, ondeEsta);
+        persistPedidos([novo, ...pedidos], { type: "upsert", item: novo });
+      }
     } else if (modal.type === "despesa") {
       const exists = despesas.some((d) => d.id === entry.id);
       persistDespesas(exists ? despesas.map((d) => (d.id === entry.id ? entry : d)) : [entry, ...despesas], { type: "upsert", item: entry });
@@ -2841,6 +3033,19 @@ function PrimeStepApp() {
 
   function deleteVenda(id) {
     persistVendas(vendas.filter((v) => v.id !== id), { type: "delete", id });
+    // Pedidos ligados à venda saem junto do controle de pares.
+    const ligados = pedidos.filter((p) => p.vendaId === id);
+    if (ligados.length) {
+      let resto = pedidos;
+      ligados.forEach((p) => {
+        resto = resto.filter((x) => x.id !== p.id);
+        persistPedidos(resto, { type: "delete", id: p.id });
+      });
+    }
+  }
+  function adicionarVendaAoControle(v, etapa) {
+    const novo = pedidoDaVenda(v, etapa);
+    persistPedidos([novo, ...pedidos], { type: "upsert", item: novo });
   }
   async function registrarPagamentoEntregador(nome, valor) {
     const p = { id: uid(), data: todayStr(), entregador: nome, valor: Math.round(valor * 100) / 100 };
@@ -2912,7 +3117,11 @@ function PrimeStepApp() {
     persistPedidos(pedidos.filter((p) => p.id !== id), { type: "delete", id });
   }
   function moverEtapaPedido(pedido, novaEtapaId) {
-    const atualizado = { ...pedido, etapa: novaEtapaId, dataEntrega: novaEtapaId === "liberado" ? todayStr() : null };
+    const atualizado = {
+      ...pedido, etapa: novaEtapaId,
+      dataEntrega: novaEtapaId === "entregue" ? todayStr() : null,
+      dataTerceirizado: novaEtapaId === "terceirizado" ? pedido.dataTerceirizado || todayStr() : novaEtapaId === "primestep" ? null : pedido.dataTerceirizado,
+    };
     persistPedidos(pedidos.map((p) => (p.id === pedido.id ? atualizado : p)), { type: "upsert", item: atualizado });
   }
 
@@ -3308,7 +3517,7 @@ function PrimeStepApp() {
             {/* Tabs */}
             <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap" }}>
               {[
-                ["operacional", `Operacional (${pedidos.filter((p) => p.etapa !== "liberado").length})`],
+                ["operacional", `Operacional (${pedidos.filter((p) => p.etapa !== "entregue").reduce((s, p) => s + paresDoPedido(p), 0)})`],
                 ["vendas", `Vendas (${vendasMes.length})`],
                 ["clientes", `Clientes (${clientes.length})`],
                 ["meta", "Meta"],
@@ -3879,72 +4088,14 @@ function PrimeStepApp() {
 
             {/* Operacional: fluxo do tênis do recebimento à entrega */}
             {tab === "operacional" && (
-              <div style={{ display: "flex", gap: 12, overflowX: "auto", paddingBottom: 8 }}>
-                {ETAPAS_PEDIDO.map((et, idx) => {
-                  const itensEtapa = pedidos.filter((p) => p.etapa === et.id);
-                  return (
-                    <div key={et.id} style={{ minWidth: 220, flex: "0 0 220px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, padding: "0 2px" }}>
-                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: et.color, flexShrink: 0 }} />
-                        <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--ink)" }}>
-                          {et.label}
-                        </span>
-                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "var(--muted)" }}>({itensEtapa.length})</span>
-                      </div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {itensEtapa.length === 0 ? (
-                          <div style={{ border: "1px dashed var(--paper-line)", borderRadius: 5, padding: "16px 10px", textAlign: "center", color: "var(--muted)", fontSize: 11.5, fontFamily: "Inter, sans-serif" }}>
-                            Vazio
-                          </div>
-                        ) : (
-                          itensEtapa.map((p) => (
-                            <LedgerCard key={p.id} style={{ padding: 10, borderLeft: `3px solid ${et.color}` }}>
-                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 4 }}>
-                                <strong style={{ fontFamily: "Inter, sans-serif", fontSize: 13, color: "var(--ink)" }}>{p.cliente}</strong>
-                                <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
-                                  <button onClick={() => setModal({ type: "pedido", initial: p })} title="Editar" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 2 }}>
-                                    <Pencil size={12} />
-                                  </button>
-                                  <button onClick={() => deletePedido(p.id)} title="Excluir" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--rust)", padding: 2 }}>
-                                    <Trash2 size={12} />
-                                  </button>
-                                </div>
-                              </div>
-                              <div style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{p.tenis}</div>
-                              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "var(--muted)", marginTop: 4 }}>
-                                Entrada: {formatDateBR(p.dataEntrada)}
-                              </div>
-                              {p.observacoes && (
-                                <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, color: "var(--ink)", marginTop: 4, fontStyle: "italic" }}>
-                                  {p.observacoes}
-                                </div>
-                              )}
-                              <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
-                                {idx > 0 && (
-                                  <button
-                                    onClick={() => moverEtapaPedido(p, ETAPAS_PEDIDO[idx - 1].id)}
-                                    style={{ flex: 1, padding: "5px 4px", borderRadius: 4, border: "1px solid var(--paper-line)", background: "transparent", color: "var(--muted)", fontSize: 11, cursor: "pointer" }}
-                                  >
-                                    ← Voltar
-                                  </button>
-                                )}
-                                {idx < ETAPAS_PEDIDO.length - 1 && (
-                                  <button
-                                    onClick={() => moverEtapaPedido(p, ETAPAS_PEDIDO[idx + 1].id)}
-                                    style={{ flex: 1, padding: "5px 4px", borderRadius: 4, border: "none", background: "var(--ink)", color: "var(--paper)", fontSize: 11, fontWeight: 600, cursor: "pointer" }}
-                                  >
-                                    Avançar →
-                                  </button>
-                                )}
-                              </div>
-                            </LedgerCard>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              <OperacionalTab
+                pedidos={pedidos}
+                vendas={vendas}
+                onMover={moverEtapaPedido}
+                onEditar={(p) => setModal({ type: "pedido", initial: p })}
+                onExcluir={deletePedido}
+                onAdicionarVenda={adicionarVendaAoControle}
+              />
             )}
 
             {/* Assinaturas */}
