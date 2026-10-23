@@ -51,6 +51,9 @@ const CATALOGO_SERVICOS = [
   },
 ];
 
+// Conta do entregador: entregas a partir desta data entram no "a pagar". O que veio antes já foi acertado.
+const INICIO_CONTA_ENTREGADOR = "2026-10-23";
+const ENTREGADOR_PADRAO = "Gabriel";
 const CATEGORIAS_DESPESA = ["Produtos e insumos", "Entregas", "Tráfego pago", "Aluguel", "Salários", "Marketing", "Impostos", "Equipamentos", "Outros"];
 
 // De onde o cliente veio. Para mudar as opções, é só editar esta lista.
@@ -230,6 +233,69 @@ function custosDasVendas(lista) {
   const entregas = lista.reduce((s, v) => s + Number(v.custoEntrega || 0), 0);
   return { terceirizacao, entregas, total: terceirizacao + entregas };
 }
+// ---------- Conta do entregador ----------
+// Entregas que cada entregador fez (lançadas nas vendas ou em Despesas › Entregas) menos o que já foi pago.
+// O pagamento abate as entregas mais antigas primeiro; o que sobra é o que falta pagar.
+function chaveEntregador(nome) {
+  return String(nome || "").trim().toLowerCase();
+}
+function contaDosEntregadores(vendas, despesas, pagamentos) {
+  const contas = {};
+  const conta = (nome) => {
+    const k = chaveEntregador(nome);
+    if (!contas[k]) contas[k] = { nome: String(nome).trim(), entregas: [], pagamentos: [] };
+    return contas[k];
+  };
+  vendas.forEach((v) => {
+    if (v.entregador && Number(v.custoEntrega || 0) > 0 && v.data >= INICIO_CONTA_ENTREGADOR)
+      conta(v.entregador).entregas.push({ id: `v-${v.id}`, data: v.data, descricao: v.cliente, valor: Number(v.custoEntrega), venda: v });
+  });
+  despesas.forEach((d) => {
+    if (d.entregador && d.categoria === "Entregas" && Number(d.valor || 0) > 0 && d.data >= INICIO_CONTA_ENTREGADOR)
+      conta(d.entregador).entregas.push({ id: `d-${d.id}`, data: d.data, descricao: d.descricao, valor: Number(d.valor), despesa: d });
+  });
+  (pagamentos || []).forEach((p) => conta(p.entregador).pagamentos.push(p));
+  return Object.values(contas)
+    .map((c) => {
+      c.entregas.sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : 0));
+      c.pagamentos.sort((a, b) => (a.data < b.data ? 1 : -1));
+      const totalEntregas = c.entregas.reduce((s, e) => s + e.valor, 0);
+      const totalPago = c.pagamentos.reduce((s, p) => s + Number(p.valor || 0), 0);
+      let credito = totalPago;
+      const pendentes = [];
+      c.entregas.forEach((e) => {
+        const abate = Math.min(credito, e.valor);
+        credito -= abate;
+        if (e.valor - abate > 0.009) pendentes.push({ ...e, falta: e.valor - abate });
+      });
+      return { ...c, totalEntregas, totalPago, falta: totalEntregas - totalPago, pendentes };
+    })
+    .sort((a, b) => b.falta - a.falta);
+}
+function rowToPagamentoEntregador(r) {
+  return { id: r.id, data: r.data, entregador: r.entregador, valor: Number(r.valor), observacao: r.observacao || "" };
+}
+// Sem a tabela no banco, devolve null e a conta do entregador avisa o que falta.
+async function loadPagamentosEntregador() {
+  const { data, error } = await supabase.from("pagamentos_entregador").select("*").order("data", { ascending: false });
+  if (error) {
+    console.warn("Tabela de pagamentos do entregador indisponível.", error);
+    return null;
+  }
+  return (data || []).map(rowToPagamentoEntregador);
+}
+async function insertPagamentoEntregador(p) {
+  const { error } = await supabase.from("pagamentos_entregador").upsert({
+    id: p.id, data: p.data, entregador: p.entregador, valor: p.valor, observacao: p.observacao || null,
+  });
+  if (error) avisarErro("registrar o pagamento do entregador", error);
+  return !error;
+}
+async function deletePagamentoEntregadorRow(id) {
+  const { error } = await supabase.from("pagamentos_entregador").delete().eq("id", id);
+  if (error) avisarErro("desfazer o pagamento do entregador", error);
+}
+
 // Despesas de uma categoria (ex.: "Entregas", "Tráfego pago").
 function somaCategoria(despesasLista, categoria) {
   return despesasLista.filter((d) => d.categoria === categoria).reduce((s, d) => s + Number(d.valor || 0), 0);
@@ -268,6 +334,7 @@ function rowToVenda(row) {
     custoEntrega: row.custo_entrega != null ? Number(row.custo_entrega) : null,
     valorPago: row.valor_pago != null ? Number(row.valor_pago) : null,
     entrada: row.valor_entrada != null ? Number(row.valor_entrada) : null,
+    entregador: row.entregador || null,
   };
 }
 function rowToCliente(r) {
@@ -299,7 +366,7 @@ async function deleteClienteRow(id) {
   if (error) avisarErro("excluir o cliente", error);
 }
 function rowToDespesa(row) {
-  return { id: row.id, data: row.data, descricao: row.descricao, categoria: row.categoria, valor: Number(row.valor) };
+  return { id: row.id, data: row.data, descricao: row.descricao, categoria: row.categoria, valor: Number(row.valor), entregador: row.entregador || null };
 }
 function rowToAssinatura(row) {
   return {
@@ -380,14 +447,15 @@ async function upsertVenda(v) {
     valor_pago: v.valorPago != null ? v.valorPago : null,
   };
   const comEntrada = { ...completo, valor_entrada: v.entrada != null ? v.entrada : null };
+  const comEntregador = { ...comEntrada, entregador: v.entregador || null };
   // Tenta salvar tudo. Se alguma coluna nova ainda não existir no banco, salva sem ela
   // (para não perder a venda) e avisa uma vez.
   // Venda com sinal sem a coluna no banco: não salva pela metade, para não perder o valor do sinal.
-  const tentativas = v.status === "parcial" ? [comEntrada] : [comEntrada, completo, comCliente, comOrigem, base];
+  const tentativas = v.status === "parcial" ? [comEntregador, comEntrada] : [comEntregador, comEntrada, completo, comCliente, comOrigem, base];
   for (const payload of tentativas) {
     const { error } = await supabase.from("vendas").upsert(payload);
     if (!error) {
-      if (payload !== comEntrada && payload !== completo && !avisoColunasMostrado) {
+      if (payload !== comEntregador && payload !== comEntrada && payload !== completo && !avisoColunasMostrado) {
         avisoColunasMostrado = true;
         window.alert(
           "A venda foi salva, mas parte das informações novas (custos, ficha do cliente, origem ou pares) não foi gravada: falta rodar o último comando SQL no Supabase."
@@ -414,9 +482,10 @@ async function deleteVendaRow(id) {
   if (error) avisarErro("excluir a venda", error);
 }
 async function upsertDespesa(d) {
-  const { error } = await supabase.from("despesas").upsert({
-    id: d.id, data: d.data, descricao: d.descricao, categoria: d.categoria, valor: d.valor,
-  });
+  const base = { id: d.id, data: d.data, descricao: d.descricao, categoria: d.categoria, valor: d.valor };
+  let { error } = await supabase.from("despesas").upsert({ ...base, entregador: d.entregador || null });
+  // Sem a coluna do entregador no banco, salva o resto da despesa.
+  if (error && (error.code === "PGRST204" || /column/i.test(error.message || ""))) ({ error } = await supabase.from("despesas").upsert(base));
   if (error) avisarErro("salvar a despesa", error);
 }
 async function deleteDespesaRow(id) {
@@ -505,7 +574,7 @@ function novoItemServico() {
   return { itemId: uid(), sel: CATALOGO_SERVICOS[0].nome, servico: CATALOGO_SERVICOS[0].nome, precoUnit: String(CATALOGO_SERVICOS[0].valor), quantidade: 1 };
 }
 
-function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastrarCliente = false }) {
+function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastrarCliente = false, entregadores = [] }) {
   const isVenda = type === "venda";
   const [data, setData] = useState(initial?.data || todayStr());
   const [nome, setNome] = useState(isVenda ? initial?.cliente || "" : initial?.descricao || "");
@@ -537,6 +606,9 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
   const [valorPago, setValorPago] = useState(fmtCampo(initial?.valorPago));
   const [valorPagoManual, setValorPagoManual] = useState(initial?.valorPago != null);
   const [entrada, setEntrada] = useState(fmtCampo(initial?.entrada));
+  // Entregador: na venda nova já vem o de sempre; na despesa só preenche se for entrega feita por ele.
+  const [entregador, setEntregador] = useState(initial?.entregador || (isVenda && !initial?.id ? ENTREGADOR_PADRAO : ""));
+  const nomesEntregadores = [...new Set([ENTREGADOR_PADRAO, ...entregadores].filter(Boolean))];
   const [itens, setItens] = useState(() => {
     if (!isVenda) return [];
     const source = initial?.itens?.length ? initial.itens : initial?.servico ? [{ servico: initial.servico, valor: initial.valor }] : null;
@@ -654,6 +726,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
         custoEntrega: custoEntrega.trim() ? parseValor(custoEntrega) : null,
         valorPago: valorFinal,
         entrada: status === "parcial" ? entradaNum : null,
+        entregador: parseValor(custoEntrega) > 0 && entregador.trim() ? entregador.trim() : null,
         assinaturaId: initial?.assinaturaId || null, mesReferencia: initial?.mesReferencia || null,
       });
     } else {
@@ -662,7 +735,10 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
         setError("Informe um valor válido.");
         return;
       }
-      onSave({ id: initial?.id || uid(), data, valor: v, descricao: nome.trim(), categoria });
+      onSave({
+        id: initial?.id || uid(), data, valor: v, descricao: nome.trim(), categoria,
+        entregador: categoria === "Entregas" && entregador.trim() ? entregador.trim() : null,
+      });
     }
   }
 
@@ -973,6 +1049,17 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                           />
                         </Field>
                       </div>
+                      {parseValor(custoEntrega) > 0 && (
+                        <Field label="Quem entregou">
+                          <input id="venda-entregador" list="lista-entregadores" value={entregador} onChange={(e) => setEntregador(e.target.value)} placeholder="Nome do entregador (vazio se foi você)" style={inputStyle} />
+                          <datalist id="lista-entregadores">
+                            {nomesEntregadores.map((n) => <option key={n} value={n} />)}
+                          </datalist>
+                          <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)" }}>
+                            {entregador.trim() ? `Entra no "a pagar" de ${entregador.trim()}.` : "Sem entregador: o custo entra no lucro, mas não na conta de ninguém."}
+                          </span>
+                        </Field>
+                      )}
                       {desconto > 0.009 && (
                         <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)" }}>
                           Desconto de {formatBRL(desconto)} sobre o total.
@@ -1000,6 +1087,17 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                     ))}
                   </select>
                 </Field>
+                {categoria === "Entregas" && (
+                  <Field label="Entregador (se foi uma entrega feita por ele)">
+                    <input list="lista-entregadores-desp" value={entregador} onChange={(e) => setEntregador(e.target.value)} placeholder="Ex.: Gabriel — deixe vazio se não for" style={inputStyle} />
+                    <datalist id="lista-entregadores-desp">
+                      {nomesEntregadores.map((n) => <option key={n} value={n} />)}
+                    </datalist>
+                    <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.4 }}>
+                      Use para entrega que não é de uma venda (buscar material, levar na terceirizada). Para registrar que você <strong>pagou</strong> o entregador, use o botão "Paguei" na conta do entregador, não lance aqui.
+                    </span>
+                  </Field>
+                )}
                 <Field label="Valor (R$)">
                   <input type="text" inputMode="decimal" value={valor} onChange={(e) => setValor(e.target.value)} placeholder="0,00" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
                 </Field>
@@ -2028,7 +2126,7 @@ function ClientesTab({ clientes, clientesOk, vendas, onAbrir, onExcluir, onImpor
 // ---------- Recado do dia ----------
 // Junta o que pede atenção hoje: ritmo da meta, ontem, cobranças, pares em processo,
 // aniversariantes e clientes para chamar de volta. Recalculado sempre com os dados atuais.
-function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana }) {
+function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador = [] }) {
   const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const hojeIso = iso(hoje);
   const ontem = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - 1);
@@ -2126,6 +2224,15 @@ function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSem
     itens.push({ tom: "info", texto: `Hoje é ${DIAS_SEMANA_EXT[hoje.getDay()].toLowerCase()}, o dia da semana que mais vende. Bom dia para postar e responder rápido.` });
   }
 
+  // Conta do entregador
+  contasEntregador
+    .filter((c) => c.falta > 0.009)
+    .forEach((c) => {
+      itens.push({
+        tom: "info",
+        texto: `Falta pagar ${formatBRL(c.falta)} ao ${c.nome} (${c.pendentes.length} entrega${c.pendentes.length === 1 ? "" : "s"}). Acerte em Despesas › Conta do entregador.`,
+      });
+    });
   return itens;
 }
 
@@ -2298,6 +2405,128 @@ function ResumoDoMes({ vendas, despesas, clientes, mesKey, mesLabel, alvo }) {
   );
 }
 
+// ---------- Conta do entregador (card) ----------
+function ContaEntregadorCard({ contas, ok, onPagar, onDesfazer, onAbrirVenda, onAbrirDespesa }) {
+  const [outroValor, setOutroValor] = useState({});
+  const [aberto, setAberto] = useState({});
+  const rotulo = { fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 };
+  const botao = (primario) => ({
+    border: primario ? "none" : "1px solid var(--paper-line)", background: primario ? "var(--ink)" : "#FFFDF8",
+    color: primario ? "var(--paper)" : "var(--ink)", borderRadius: 5, padding: "8px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer",
+    fontFamily: "Inter, sans-serif",
+  });
+  const fmtDia = (iso) => iso.slice(8, 10) + "/" + iso.slice(5, 7);
+
+  return (
+    <LedgerCard style={{ padding: "14px 16px", marginBottom: 10, fontFamily: "Inter, sans-serif" }}>
+      <div style={{ ...rotulo, marginBottom: 8 }}>Conta do entregador</div>
+      {!ok ? (
+        <div style={{ fontSize: 13, color: "var(--rust)" }}>A tabela de pagamentos do entregador ainda não existe no banco. Fale com o Claude para criar.</div>
+      ) : contas.length === 0 ? (
+        <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.5 }}>
+          Nenhuma entrega na conta ainda. Ao lançar uma venda com custo de entrega, diga quem entregou: o valor entra aqui como "a pagar".
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {contas.map((c) => {
+            const k = chaveEntregador(c.nome);
+            const valorOutro = parseValor(outroValor[k]);
+            return (
+              <div key={k} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 14, color: "var(--ink)" }}>
+                    {c.falta > 0.009 ? "Falta pagar ao " : c.falta < -0.009 ? "Pago a mais ao " : "Tudo pago ao "}
+                    <strong>{c.nome}</strong>
+                  </span>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 22, color: c.falta > 0.009 ? "var(--rust)" : "var(--green)" }}>
+                    {formatBRL(Math.abs(c.falta))}
+                  </span>
+                </div>
+                {c.falta < -0.009 && (
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>Esse valor vai abater das próximas entregas dele.</span>
+                )}
+                {c.pendentes.length > 0 && (
+                  <div style={{ border: "1px solid var(--paper-line)", borderRadius: 5 }}>
+                    {c.pendentes.map((e) => (
+                      <button
+                        key={e.id}
+                        onClick={() => (e.venda ? onAbrirVenda(e.venda) : onAbrirDespesa(e.despesa))}
+                        title="Abrir para conferir ou corrigir"
+                        style={{ display: "flex", width: "100%", justifyContent: "space-between", gap: 8, padding: "7px 10px", border: "none", borderBottom: "1px solid var(--paper-line)", background: "none", cursor: "pointer", fontSize: 12.5, color: "var(--ink)", textAlign: "left", fontFamily: "Inter, sans-serif" }}
+                      >
+                        <span>
+                          <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "var(--muted)", marginRight: 8 }}>{fmtDia(e.data)}</span>
+                          {e.venda ? `Entrega · ${e.descricao}` : e.descricao}
+                        </span>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+                          {formatBRL(e.falta)}
+                          {e.falta < e.valor - 0.009 && <span style={{ color: "var(--muted)", fontWeight: 400 }}> de {formatBRL(e.valor)}</span>}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {c.falta > 0.009 && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <button
+                      style={botao(true)}
+                      onClick={() => {
+                        if (window.confirm(`Registrar pagamento de ${formatBRL(c.falta)} ao ${c.nome} hoje?`)) onPagar(c.nome, c.falta);
+                      }}
+                    >
+                      Paguei tudo ({formatBRL(c.falta)})
+                    </button>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="Outro valor"
+                      value={outroValor[k] || ""}
+                      onChange={(ev) => setOutroValor((o) => ({ ...o, [k]: ev.target.value }))}
+                      style={{ ...inputStyle, width: 110, fontFamily: "'JetBrains Mono', monospace" }}
+                    />
+                    <button
+                      style={botao(false)}
+                      disabled={valorOutro <= 0}
+                      onClick={() => {
+                        if (valorOutro > 0 && window.confirm(`Registrar pagamento de ${formatBRL(valorOutro)} ao ${c.nome} hoje?`)) {
+                          onPagar(c.nome, valorOutro);
+                          setOutroValor((o) => ({ ...o, [k]: "" }));
+                        }
+                      }}
+                    >
+                      Paguei este valor
+                    </button>
+                  </div>
+                )}
+                {c.pagamentos.length > 0 && (
+                  <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                    <button onClick={() => setAberto((a) => ({ ...a, [k]: !a[k] }))} style={{ border: "none", background: "none", padding: 0, cursor: "pointer", color: "var(--muted)", fontSize: 12, textDecoration: "underline", fontFamily: "Inter, sans-serif" }}>
+                      {aberto[k] ? "Esconder pagamentos" : `Ver pagamentos (${c.pagamentos.length})`}
+                    </button>
+                    {aberto[k] && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+                        {c.pagamentos.map((p) => (
+                          <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                            <span><span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{fmtDia(p.data)}</span> · pago {formatBRL(p.valor)}</span>
+                            <button onClick={() => onDesfazer(p.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "var(--rust)", fontSize: 12, fontFamily: "Inter, sans-serif" }}>desfazer</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.45 }}>
+            O custo de cada entrega já entra nas despesas do mês. O pagamento só acerta a conta com o entregador, não conta como despesa de novo.
+          </div>
+        </div>
+      )}
+    </LedgerCard>
+  );
+}
+
 // ---------- Tráfego pago do mês ----------
 function TrafegoDoMes({ vendas, despesas, mesKey, mesLabel }) {
   const doMes = (lista, k) => lista.filter((x) => x.data?.startsWith(k));
@@ -2406,6 +2635,8 @@ function PrimeStepApp() {
   const [metas, setMetas] = useState({}); // metas salvas no banco, por mês (AAAA-MM)
   const [clientes, setClientes] = useState([]);
   const [clientesOk, setClientesOk] = useState(true); // false = tabela de clientes ainda não existe
+  const [pagamentosEntregador, setPagamentosEntregador] = useState([]);
+  const [pagamentosEntregadorOk, setPagamentosEntregadorOk] = useState(true);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
   const [modal, setModal] = useState(null); // {type: 'venda'|'despesa'|'assinatura'|'pedido', initial?}
@@ -2414,7 +2645,9 @@ function PrimeStepApp() {
 
   useEffect(() => {
     (async () => {
-      const [v, d, a, p, mt, cl] = await Promise.all([loadVendas(), loadDespesas(), loadAssinaturas(), loadPedidos(), loadMetas(), loadClientes()]);
+      const [v, d, a, p, mt, cl, pe] = await Promise.all([loadVendas(), loadDespesas(), loadAssinaturas(), loadPedidos(), loadMetas(), loadClientes(), loadPagamentosEntregador()]);
+      setPagamentosEntregador(pe || []);
+      setPagamentosEntregadorOk(pe !== null);
       setVendas(v);
       setDespesas(d);
       setAssinaturas(a);
@@ -2568,6 +2801,17 @@ function PrimeStepApp() {
 
   function deleteVenda(id) {
     persistVendas(vendas.filter((v) => v.id !== id), { type: "delete", id });
+  }
+  async function registrarPagamentoEntregador(nome, valor) {
+    const p = { id: uid(), data: todayStr(), entregador: nome, valor: Math.round(valor * 100) / 100 };
+    setPagamentosEntregador((prev) => [p, ...prev]);
+    const ok = await insertPagamentoEntregador(p);
+    if (!ok) setPagamentosEntregador((prev) => prev.filter((x) => x.id !== p.id));
+  }
+  function desfazerPagamentoEntregador(id) {
+    if (!window.confirm("Desfazer este pagamento? O valor volta para o \"falta pagar\".")) return;
+    setPagamentosEntregador((prev) => prev.filter((x) => x.id !== id));
+    deletePagamentoEntregadorRow(id);
   }
   function deleteDespesa(id) {
     persistDespesas(despesas.filter((d) => d.id !== id), { type: "delete", id });
@@ -2810,12 +3054,16 @@ function PrimeStepApp() {
   const melhorDiaSemana = vendasPorDiaSemana.length ? vendasPorDiaSemana.reduce((a, b) => (b.total > a.total ? b : a)) : null;
 
   // Recado do dia: sempre sobre o mês de hoje, independente do mês escolhido no filtro.
+  const contasEntregador = useMemo(
+    () => contaDosEntregadores(vendas, despesas, pagamentosEntregador),
+    [vendas, despesas, pagamentosEntregador]
+  );
   const recadoDoDia = useMemo(() => {
     const hoje = new Date();
     const mesHoje = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}`;
     const alvo = metas[mesHoje] || METAS_PADRAO[mesHoje] || null;
-    return montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana });
-  }, [vendas, pedidos, clientes, metas, melhorDiaSemana]);
+    return montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador });
+  }, [vendas, pedidos, clientes, metas, melhorDiaSemana, contasEntregador]);
 
   // Grade de calendário do mês selecionado, com o total vendido e os pares de cada dia.
   const calendarioSemanas = useMemo(() => {
@@ -3740,6 +3988,16 @@ function PrimeStepApp() {
             {/* List */}
             {tab !== "analises" && tab !== "historico" && tab !== "assinaturas" && tab !== "operacional" && tab !== "calendario" && tab !== "meta" && tab !== "clientes" && (
             <>
+            {tab === "despesas" && (
+              <ContaEntregadorCard
+                contas={contasEntregador}
+                ok={pagamentosEntregadorOk}
+                onPagar={registrarPagamentoEntregador}
+                onDesfazer={desfazerPagamentoEntregador}
+                onAbrirVenda={(v) => setModal({ type: "venda", initial: v })}
+                onAbrirDespesa={(d) => setModal({ type: "despesa", initial: d })}
+              />
+            )}
             {tab === "despesas" && (() => {
               const cv = custosDasVendas(vendasMes);
               const entregasAqui = despesasMes.filter((d) => d.categoria === "Entregas").reduce((s, d) => s + Number(d.valor || 0), 0);
@@ -3899,6 +4157,7 @@ function PrimeStepApp() {
           initial={modal.initial}
           clientes={clientes}
           podeCadastrarCliente={clientesOk}
+          entregadores={contasEntregador.map((c) => c.nome)}
           onSave={handleSaveEntry}
           onClose={() => setModal(null)}
         />
