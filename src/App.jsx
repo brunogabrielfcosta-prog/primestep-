@@ -90,6 +90,9 @@ const CATALOGO_SERVICOS = [
 // Conta do entregador: entregas a partir desta data entram no "a pagar". O que veio antes já foi acertado.
 const INICIO_CONTA_ENTREGADOR = "2026-10-23";
 const ENTREGADOR_PADRAO = "Gabriel";
+// Conta do terceirizado: serviços terceirizados a partir desta data entram no "a pagar" da sapataria.
+const INICIO_CONTA_TERCEIRIZADO = "2026-10-26";
+const TERCEIRIZADOS = ["Sapataria do Futuro", "Sapataria América"];
 const CATEGORIAS_DESPESA = ["Produtos e insumos", "Entregas", "Tráfego pago", "Aluguel", "Salários", "Marketing", "Impostos", "Equipamentos", "Outros"];
 
 // De onde o cliente veio. Para mudar as opções, é só editar esta lista.
@@ -322,6 +325,25 @@ function contaDosEntregadores(vendas, despesas, pagamentos) {
       conta(d.entregador).entregas.push({ id: `d-${d.id}`, data: d.data, descricao: d.descricao, valor: Number(d.valor), despesa: d });
   });
   (pagamentos || []).forEach((p) => conta(p.entregador).pagamentos.push(p));
+  return fecharContas(contas);
+}
+// Serviços feitos por cada sapataria (custo lançado na venda) menos o que já foi pago a ela.
+function contaDosTerceirizados(vendas, pagamentos) {
+  const contas = {};
+  const conta = (nome) => {
+    const k = chaveEntregador(nome);
+    if (!contas[k]) contas[k] = { nome: String(nome).trim(), entregas: [], pagamentos: [] };
+    return contas[k];
+  };
+  vendas.forEach((v) => {
+    if (v.terceirizado && Number(v.custo || 0) > 0 && v.data >= INICIO_CONTA_TERCEIRIZADO)
+      conta(v.terceirizado).entregas.push({ id: `v-${v.id}`, data: v.data, descricao: v.cliente, valor: Number(v.custo), venda: v });
+  });
+  (pagamentos || []).forEach((p) => conta(p.terceirizado).pagamentos.push(p));
+  return fecharContas(contas);
+}
+// Abate os pagamentos das entregas/serviços mais antigos primeiro; o que sobra é o que falta pagar.
+function fecharContas(contas) {
   return Object.values(contas)
     .map((c) => {
       c.entregas.sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : 0));
@@ -357,6 +379,28 @@ async function insertPagamentoEntregador(p) {
   });
   if (error) avisarErro("registrar o pagamento do entregador", error);
   return !error;
+}
+function rowToPagamentoTerceirizado(r) {
+  return { id: r.id, data: r.data, terceirizado: r.terceirizado, valor: Number(r.valor), observacao: r.observacao || "" };
+}
+async function loadPagamentosTerceirizado() {
+  const { data, error } = await supabase.from("pagamentos_terceirizado").select("*").order("data", { ascending: false });
+  if (error) {
+    console.warn("Tabela de pagamentos do terceirizado indisponível.", error);
+    return null;
+  }
+  return (data || []).map(rowToPagamentoTerceirizado);
+}
+async function insertPagamentoTerceirizado(p) {
+  const { error } = await supabase.from("pagamentos_terceirizado").upsert({
+    id: p.id, data: p.data, terceirizado: p.terceirizado, valor: p.valor, observacao: p.observacao || null,
+  });
+  if (error) avisarErro("registrar o pagamento da sapataria", error);
+  return !error;
+}
+async function deletePagamentoTerceirizadoRow(id) {
+  const { error } = await supabase.from("pagamentos_terceirizado").delete().eq("id", id);
+  if (error) avisarErro("desfazer o pagamento da sapataria", error);
 }
 async function deletePagamentoEntregadorRow(id) {
   const { error } = await supabase.from("pagamentos_entregador").delete().eq("id", id);
@@ -402,6 +446,7 @@ function rowToVenda(row) {
     valorPago: row.valor_pago != null ? Number(row.valor_pago) : null,
     entrada: row.valor_entrada != null ? Number(row.valor_entrada) : null,
     entregador: row.entregador || null,
+    terceirizado: row.terceirizado || null,
   };
 }
 function rowToCliente(r) {
@@ -517,14 +562,15 @@ async function upsertVenda(v) {
   };
   const comEntrada = { ...completo, valor_entrada: v.entrada != null ? v.entrada : null };
   const comEntregador = { ...comEntrada, entregador: v.entregador || null };
+  const comTerceirizado = { ...comEntregador, terceirizado: v.terceirizado || null };
   // Tenta salvar tudo. Se alguma coluna nova ainda não existir no banco, salva sem ela
   // (para não perder a venda) e avisa uma vez.
   // Venda com sinal sem a coluna no banco: não salva pela metade, para não perder o valor do sinal.
-  const tentativas = v.status === "parcial" ? [comEntregador, comEntrada] : [comEntregador, comEntrada, completo, comCliente, comOrigem, base];
+  const tentativas = v.status === "parcial" ? [comTerceirizado, comEntregador, comEntrada] : [comTerceirizado, comEntregador, comEntrada, completo, comCliente, comOrigem, base];
   for (const payload of tentativas) {
     const { error } = await supabase.from("vendas").upsert(payload);
     if (!error) {
-      if (payload !== comEntregador && payload !== comEntrada && payload !== completo && !avisoColunasMostrado) {
+      if (payload !== comTerceirizado && payload !== comEntregador && payload !== comEntrada && payload !== completo && !avisoColunasMostrado) {
         avisoColunasMostrado = true;
         window.alert(
           "A venda foi salva, mas parte das informações novas (custos, ficha do cliente, origem ou pares) não foi gravada: falta rodar o último comando SQL no Supabase."
@@ -681,6 +727,8 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
   const nomesEntregadores = [...new Set([ENTREGADOR_PADRAO, ...entregadores].filter(Boolean))];
   // Venda nova: onde o tênis está agora (entra no controle do Operacional).
   const [ondeEsta, setOndeEsta] = useState("primestep");
+  // Quem fez o serviço terceirizado (o custo vira "a pagar" para a sapataria).
+  const [terceirizado, setTerceirizado] = useState(initial?.terceirizado || "");
   const [itens, setItens] = useState(() => {
     if (!isVenda) return [];
     const source = initial?.itens?.length ? initial.itens : initial?.servico ? [{ servico: initial.servico, valor: initial.valor }] : null;
@@ -799,6 +847,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
         valorPago: valorFinal,
         entrada: status === "parcial" ? entradaNum : null,
         entregador: parseValor(custoEntrega) > 0 && entregador.trim() ? entregador.trim() : null,
+        terceirizado: parseValor(custo) > 0 && terceirizado ? terceirizado : null,
         ondeEsta: !initial?.id && !initial?.assinaturaId && ondeEsta !== "nenhum" ? ondeEsta : null,
         assinaturaId: initial?.assinaturaId || null, mesReferencia: initial?.mesReferencia || null,
       });
@@ -1132,6 +1181,19 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                           />
                         </Field>
                       </div>
+                      {parseValor(custo) > 0 && (
+                        <Field label="Quem fez o serviço (terceirizado)">
+                          <select id="venda-terceirizado" value={terceirizado} onChange={(e) => setTerceirizado(e.target.value)} style={inputStyle}>
+                            <option value="">Ninguém — é custo de produto ou insumo</option>
+                            {[...new Set([...TERCEIRIZADOS, ...(terceirizado ? [terceirizado] : [])])].map((n) => (
+                              <option key={n} value={n}>{n}</option>
+                            ))}
+                          </select>
+                          <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)" }}>
+                            {terceirizado ? `O custo entra no "a pagar" da ${terceirizado}.` : "Sem sapataria: o custo entra no lucro, mas não na conta de ninguém."}
+                          </span>
+                        </Field>
+                      )}
                       {parseValor(custoEntrega) > 0 && (
                         <Field label="Quem entregou">
                           <input id="venda-entregador" list="lista-entregadores" value={entregador} onChange={(e) => setEntregador(e.target.value)} placeholder="Nome do entregador (vazio se foi você)" style={inputStyle} />
@@ -2216,7 +2278,7 @@ function ClientesTab({ clientes, clientesOk, vendas, onAbrir, onExcluir, onImpor
 // ---------- Recado do dia ----------
 // Junta o que pede atenção hoje: ritmo da meta, ontem, cobranças, pares em processo,
 // aniversariantes e clientes para chamar de volta. Recalculado sempre com os dados atuais.
-function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador = [] }) {
+function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador = [], contasTerceirizado = [] }) {
   const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const hojeIso = iso(hoje);
   const ontem = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - 1);
@@ -2324,6 +2386,15 @@ function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSem
       itens.push({
         tom: "info",
         texto: `Falta pagar ${formatBRL(c.falta)} ao ${c.nome} (${c.pendentes.length} entrega${c.pendentes.length === 1 ? "" : "s"}). Acerte em Despesas › Conta do entregador.`,
+      });
+    });
+  // Conta das sapatarias
+  contasTerceirizado
+    .filter((c) => c.falta > 0.009)
+    .forEach((c) => {
+      itens.push({
+        tom: "info",
+        texto: `Falta pagar ${formatBRL(c.falta)} à ${c.nome} (${c.pendentes.length} serviço${c.pendentes.length === 1 ? "" : "s"}). Acerte em Despesas › Conta das sapatarias.`,
       });
     });
   return itens;
@@ -2643,7 +2714,13 @@ function OperacionalTab({ pedidos, vendas, onMover, onEditar, onExcluir, onAdici
 }
 
 // ---------- Conta do entregador (card) ----------
-function ContaEntregadorCard({ contas, ok, onPagar, onDesfazer, onAbrirVenda, onAbrirDespesa }) {
+function ContaEntregadorCard({
+  contas, ok, onPagar, onDesfazer, onAbrirVenda, onAbrirDespesa,
+  titulo = "Conta do entregador", prep = "ao", prefixoVenda = "Entrega",
+  vazio = 'Nenhuma entrega na conta ainda. Ao lançar uma venda com custo de entrega, diga quem entregou: o valor entra aqui como "a pagar".',
+  semTabela = "A tabela de pagamentos do entregador ainda não existe no banco. Fale com o Claude para criar.",
+  rodape = "O custo de cada entrega já entra nas despesas do mês. O pagamento só acerta a conta com o entregador, não conta como despesa de novo.",
+}) {
   const [outroValor, setOutroValor] = useState({});
   const [aberto, setAberto] = useState({});
   const rotulo = { fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 };
@@ -2656,12 +2733,12 @@ function ContaEntregadorCard({ contas, ok, onPagar, onDesfazer, onAbrirVenda, on
 
   return (
     <LedgerCard style={{ padding: "14px 16px", marginBottom: 10, fontFamily: "Inter, sans-serif" }}>
-      <div style={{ ...rotulo, marginBottom: 8 }}>Conta do entregador</div>
+      <div style={{ ...rotulo, marginBottom: 8 }}>{titulo}</div>
       {!ok ? (
-        <div style={{ fontSize: 13, color: "var(--rust)" }}>A tabela de pagamentos do entregador ainda não existe no banco. Fale com o Claude para criar.</div>
+        <div style={{ fontSize: 13, color: "var(--rust)" }}>{semTabela}</div>
       ) : contas.length === 0 ? (
         <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.5 }}>
-          Nenhuma entrega na conta ainda. Ao lançar uma venda com custo de entrega, diga quem entregou: o valor entra aqui como "a pagar".
+          {vazio}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -2672,7 +2749,7 @@ function ContaEntregadorCard({ contas, ok, onPagar, onDesfazer, onAbrirVenda, on
               <div key={k} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 14, color: "var(--ink)" }}>
-                    {c.falta > 0.009 ? "Falta pagar ao " : c.falta < -0.009 ? "Pago a mais ao " : "Tudo pago ao "}
+                    {c.falta > 0.009 ? `Falta pagar ${prep} ` : c.falta < -0.009 ? `Pago a mais ${prep} ` : `Tudo pago ${prep} `}
                     <strong>{c.nome}</strong>
                   </span>
                   <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 22, color: c.falta > 0.009 ? "var(--rust)" : "var(--green)" }}>
@@ -2693,7 +2770,7 @@ function ContaEntregadorCard({ contas, ok, onPagar, onDesfazer, onAbrirVenda, on
                       >
                         <span>
                           <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "var(--muted)", marginRight: 8 }}>{fmtDia(e.data)}</span>
-                          {e.venda ? `Entrega · ${e.descricao}` : e.descricao}
+                          {e.venda ? `${prefixoVenda} · ${e.descricao}` : e.descricao}
                         </span>
                         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
                           {formatBRL(e.falta)}
@@ -2708,7 +2785,7 @@ function ContaEntregadorCard({ contas, ok, onPagar, onDesfazer, onAbrirVenda, on
                     <button
                       style={botao(true)}
                       onClick={() => {
-                        if (window.confirm(`Registrar pagamento de ${formatBRL(c.falta)} ao ${c.nome} hoje?`)) onPagar(c.nome, c.falta);
+                        if (window.confirm(`Registrar pagamento de ${formatBRL(c.falta)} ${prep} ${c.nome} hoje?`)) onPagar(c.nome, c.falta);
                       }}
                     >
                       Paguei tudo ({formatBRL(c.falta)})
@@ -2725,7 +2802,7 @@ function ContaEntregadorCard({ contas, ok, onPagar, onDesfazer, onAbrirVenda, on
                       style={botao(false)}
                       disabled={valorOutro <= 0}
                       onClick={() => {
-                        if (valorOutro > 0 && window.confirm(`Registrar pagamento de ${formatBRL(valorOutro)} ao ${c.nome} hoje?`)) {
+                        if (valorOutro > 0 && window.confirm(`Registrar pagamento de ${formatBRL(valorOutro)} ${prep} ${c.nome} hoje?`)) {
                           onPagar(c.nome, valorOutro);
                           setOutroValor((o) => ({ ...o, [k]: "" }));
                         }
@@ -2756,7 +2833,7 @@ function ContaEntregadorCard({ contas, ok, onPagar, onDesfazer, onAbrirVenda, on
             );
           })}
           <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.45 }}>
-            O custo de cada entrega já entra nas despesas do mês. O pagamento só acerta a conta com o entregador, não conta como despesa de novo.
+            {rodape}
           </div>
         </div>
       )}
@@ -2874,6 +2951,8 @@ function PrimeStepApp() {
   const [clientesOk, setClientesOk] = useState(true); // false = tabela de clientes ainda não existe
   const [pagamentosEntregador, setPagamentosEntregador] = useState([]);
   const [pagamentosEntregadorOk, setPagamentosEntregadorOk] = useState(true);
+  const [pagamentosTerceirizado, setPagamentosTerceirizado] = useState([]);
+  const [pagamentosTerceirizadoOk, setPagamentosTerceirizadoOk] = useState(true);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
   const [modal, setModal] = useState(null); // {type: 'venda'|'despesa'|'assinatura'|'pedido', initial?}
@@ -2883,6 +2962,9 @@ function PrimeStepApp() {
   useEffect(() => {
     (async () => {
       const [v, d, a, p, mt, cl, pe] = await Promise.all([loadVendas(), loadDespesas(), loadAssinaturas(), loadPedidos(), loadMetas(), loadClientes(), loadPagamentosEntregador()]);
+      const pt = await loadPagamentosTerceirizado();
+      setPagamentosTerceirizado(pt || []);
+      setPagamentosTerceirizadoOk(pt !== null);
       setPagamentosEntregador(pe || []);
       setPagamentosEntregadorOk(pe !== null);
       setVendas(v);
@@ -3063,6 +3145,17 @@ function PrimeStepApp() {
     setPagamentosEntregador((prev) => [p, ...prev]);
     const ok = await insertPagamentoEntregador(p);
     if (!ok) setPagamentosEntregador((prev) => prev.filter((x) => x.id !== p.id));
+  }
+  async function registrarPagamentoTerceirizado(nome, valor) {
+    const p = { id: uid(), data: todayStr(), terceirizado: nome, valor: Math.round(valor * 100) / 100 };
+    setPagamentosTerceirizado((prev) => [p, ...prev]);
+    const ok = await insertPagamentoTerceirizado(p);
+    if (!ok) setPagamentosTerceirizado((prev) => prev.filter((x) => x.id !== p.id));
+  }
+  function desfazerPagamentoTerceirizado(id) {
+    if (!window.confirm("Desfazer este pagamento? O valor volta para o \"falta pagar\".")) return;
+    setPagamentosTerceirizado((prev) => prev.filter((x) => x.id !== id));
+    deletePagamentoTerceirizadoRow(id);
   }
   function desfazerPagamentoEntregador(id) {
     if (!window.confirm("Desfazer este pagamento? O valor volta para o \"falta pagar\".")) return;
@@ -3318,12 +3411,13 @@ function PrimeStepApp() {
     () => contaDosEntregadores(vendas, despesas, pagamentosEntregador),
     [vendas, despesas, pagamentosEntregador]
   );
+  const contasTerceirizado = useMemo(() => contaDosTerceirizados(vendas, pagamentosTerceirizado), [vendas, pagamentosTerceirizado]);
   const recadoDoDia = useMemo(() => {
     const hoje = new Date();
     const mesHoje = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}`;
     const alvo = metas[mesHoje] || METAS_PADRAO[mesHoje] || null;
-    return montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador });
-  }, [vendas, pedidos, clientes, metas, melhorDiaSemana, contasEntregador]);
+    return montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador, contasTerceirizado });
+  }, [vendas, pedidos, clientes, metas, melhorDiaSemana, contasEntregador, contasTerceirizado]);
 
   // Grade de calendário do mês selecionado, com o total vendido e os pares de cada dia.
   const calendarioSemanas = useMemo(() => {
@@ -4198,6 +4292,22 @@ function PrimeStepApp() {
                 onDesfazer={desfazerPagamentoEntregador}
                 onAbrirVenda={(v) => setModal({ type: "venda", initial: v })}
                 onAbrirDespesa={(d) => setModal({ type: "despesa", initial: d })}
+              />
+            )}
+            {tab === "despesas" && (
+              <ContaEntregadorCard
+                titulo="Conta das sapatarias (terceirizado)"
+                prep="à"
+                prefixoVenda="Serviço"
+                vazio='Nenhum serviço terceirizado na conta ainda. Ao lançar uma venda com custo, escolha em "Quem fez o serviço" a sapataria: o valor entra aqui como "a pagar".'
+                semTabela="A tabela de pagamentos das sapatarias ainda não existe no banco. Fale com o Claude para criar."
+                rodape="O custo de cada serviço já entra nas despesas do mês (terceirização). O pagamento só acerta a conta com a sapataria, não conta como despesa de novo."
+                contas={contasTerceirizado}
+                ok={pagamentosTerceirizadoOk}
+                onPagar={registrarPagamentoTerceirizado}
+                onDesfazer={desfazerPagamentoTerceirizado}
+                onAbrirVenda={(v) => setModal({ type: "venda", initial: v })}
+                onAbrirDespesa={() => {}}
               />
             )}
             {tab === "despesas" && (() => {
