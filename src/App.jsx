@@ -8,7 +8,18 @@ import ControlePessoal from "./ControlePessoal.jsx";
 // A chave abaixo é a chave pública ("anon"), feita para ser usada no navegador.
 const SUPABASE_URL = "https://gwqbzquvjodwtzebbxra.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3cWJ6cXV2am9kd3R6ZWJieHJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxOTI4NDAsImV4cCI6MjEwMzc2ODg0MH0.6bUPgnOO0SxmW0ilhZK85KFO2vls5QkCxg-BLRt-vMs";
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// O login fica só na memória da página: ao recarregar ou abrir de novo, o sistema pede a senha.
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: true },
+});
+// Apaga o login que versões antigas deixaram guardado no navegador.
+try {
+  Object.keys(window.localStorage)
+    .filter((k) => k.startsWith("sb-") && k.endsWith("-auth-token"))
+    .forEach((k) => window.localStorage.removeItem(k));
+} catch (e) {
+  /* navegador sem acesso ao armazenamento: nada a limpar */
+}
 
 // Mostra na tela quando algo não foi salvo (antes, o erro ficava escondido).
 let ultimoAvisoErro = 0;
