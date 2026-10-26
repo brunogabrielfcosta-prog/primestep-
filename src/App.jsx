@@ -3430,13 +3430,17 @@ function PrimeStepApp() {
       const iso = `${monthFilter}-${String(dia).padStart(2, "0")}`;
       const vendasDoDia = vendas.filter((v) => v.data === iso);
       const total = vendasDoDia.reduce((s, v) => s + Number(v.valor || 0), 0);
-      celulas.push({ dia, iso, total, qtd: vendasDoDia.length, pares: somaPares(vendasDoDia) });
+      // Lucro real do dia = o que as vendas deixaram (já sem terceirização e entrega) − outras despesas lançadas no dia.
+      const lucroVendas = somaLucro(vendasDoDia);
+      const gastos = despesas.filter((d) => d.data === iso).reduce((s, d) => s + Number(d.valor || 0), 0);
+      const semCusto = vendasDoDia.filter((v) => !v.assinaturaId && v.custo == null && v.custoEntrega == null).length;
+      celulas.push({ dia, iso, total, qtd: vendasDoDia.length, pares: somaPares(vendasDoDia), lucroVendas, gastos, lucro: lucroVendas - gastos, semCusto });
     }
     while (celulas.length % 7 !== 0) celulas.push(null);
     const semanas = [];
     for (let i = 0; i < celulas.length; i += 7) semanas.push(celulas.slice(i, i + 7));
     return semanas;
-  }, [vendas, monthFilter]);
+  }, [vendas, despesas, monthFilter]);
 
   // Resumo de cada semana do mês (semanas de domingo a sábado, como no calendário).
   const resumoSemanas = useMemo(() => {
@@ -3453,13 +3457,19 @@ function PrimeStepApp() {
         total,
         qtd: dias.reduce((s, c) => s + c.qtd, 0),
         pares: dias.reduce((s, c) => s + c.pares, 0),
+        lucroVendas: dias.reduce((s, c) => s + c.lucroVendas, 0),
+        gastos: dias.reduce((s, c) => s + c.gastos, 0),
+        lucro: dias.reduce((s, c) => s + c.lucro, 0),
+        semCusto: dias.reduce((s, c) => s + c.semCusto, 0),
         // Parte da meta do mês que cabe nesta semana, proporcional aos dias dela.
         metaSemana: alvoMes ? (alvoMes.meta * dias.length) / diasNoMes : null,
       };
     });
   }, [calendarioSemanas, monthFilter, alvoMes]);
   const melhorSemanaMes = resumoSemanas.length ? resumoSemanas.reduce((a, b) => (b.total > a.total ? b : a)) : null;
-  const maxDiaValor = Math.max(1, ...calendarioSemanas.flat().filter(Boolean).map((c) => c.total));
+  const [calModo, setCalModo] = useState("lucro"); // 'lucro' | 'faturamento'
+  const valorCal = (c) => (calModo === "lucro" ? c.lucro : c.total);
+  const maxDiaValor = Math.max(1, ...calendarioSemanas.flat().filter(Boolean).map((c) => Math.abs(valorCal(c))));
 
   // Histórico completo: todos os meses que já tiveram movimento, do primeiro ao mais recente.
   const historicoCompleto = useMemo(() => {
@@ -3588,10 +3598,10 @@ function PrimeStepApp() {
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
               <StatCard label="Receitas do mês" value={formatBRL(totalReceitas)} icon={TrendingUp} tone="up" />
               <StatCard label="Despesas do mês (com custos das vendas)" value={formatBRL(totalDespesas)} icon={TrendingDown} tone="down" />
-              <StatCard label="Saldo" value={formatBRL(saldo)} icon={Wallet} tone={saldo >= 0 ? "up" : "down"} />
+              <StatCard label="Lucro real do mês (saldo)" value={formatBRL(saldo)} icon={Wallet} tone={saldo >= 0 ? "up" : "down"} />
               <StatCard label="A receber (pendente)" value={formatBRL(pendentes)} icon={Clock} />
               <StatCard label="Pares feitos no mês" value={String(paresMes)} icon={Check} />
-              <StatCard label="Lucro real das vendas" value={formatBRL(lucroVendasMes)} icon={TrendingUp} tone={lucroVendasMes >= 0 ? "up" : "down"} />
+              <StatCard label="Lucro das vendas (antes das outras despesas)" value={formatBRL(lucroVendasMes)} icon={TrendingUp} tone={lucroVendasMes >= 0 ? "up" : "down"} />
               <StatCard label="Custos das vendas" value={formatBRL(custosVendasMes)} icon={TrendingDown} tone="down" />
             </div>
 
@@ -3945,11 +3955,27 @@ function PrimeStepApp() {
             {tab === "calendario" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 <LedgerCard style={{ padding: "16px 16px 14px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                    <Calendar size={15} color="var(--ink)" />
-                    <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
-                      Vendas em {monthLabel(monthFilter)} — {labelPares(paresMes)}
-                    </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap", justifyContent: "space-between" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Calendar size={15} color="var(--ink)" />
+                      <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
+                        {calModo === "lucro" ? "Lucro real" : "Vendas"} em {monthLabel(monthFilter)} — {labelPares(paresMes)}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      {[["lucro", "Lucro real"], ["faturamento", "Faturamento"]].map(([k, l]) => (
+                        <button
+                          key={k}
+                          onClick={() => setCalModo(k)}
+                          style={{
+                            padding: "4px 10px", borderRadius: 4, fontSize: 11.5, fontWeight: 600, cursor: "pointer", fontFamily: "Inter, sans-serif",
+                            border: "1px solid var(--paper-line)", background: calModo === k ? "var(--ink)" : "transparent", color: calModo === k ? "var(--paper)" : "var(--muted)",
+                          }}
+                        >
+                          {l}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 6 }}>
                     {DIAS_SEMANA.map((d) => (
@@ -3971,15 +3997,18 @@ function PrimeStepApp() {
                       >
                         {semana.map((cel, ci) => {
                           if (!cel) return <div key={ci} />;
-                          const intensidade = cel.total > 0 ? Math.max(0.12, cel.total / maxDiaValor) : 0;
+                          const valorDia = valorCal(cel);
+                          const temMovimento = cel.total > 0 || cel.gastos > 0;
+                          const intensidade = valorDia !== 0 ? Math.max(0.12, Math.abs(valorDia) / maxDiaValor) : 0;
+                          const fundo = !temMovimento || valorDia === 0 ? "#FFFDF8" : valorDia > 0 ? `rgba(75,101,82,${intensidade})` : `rgba(162,70,50,${intensidade * 0.6})`;
                           return (
                             <div
                               key={ci}
                               onClick={() => setSelectedDia(cel.iso)}
-                              title={cel.total > 0 ? `${formatDateBR(cel.iso)}: ${formatBRL(cel.total)} (${cel.qtd} venda${cel.qtd > 1 ? "s" : ""}, ${labelPares(cel.pares)}) — toque para ver` : `${formatDateBR(cel.iso)} — toque para registrar`}
+                              title={temMovimento ? `${formatDateBR(cel.iso)}: faturou ${formatBRL(cel.total)} · lucro real ${formatBRL(cel.lucro)}${cel.gastos ? ` (já tirando ${formatBRL(cel.gastos)} de despesas do dia)` : ""} · ${cel.qtd} venda${cel.qtd === 1 ? "" : "s"}, ${labelPares(cel.pares)}${cel.semCusto ? ` · ${cel.semCusto} sem custo lançado` : ""} — toque para ver` : `${formatDateBR(cel.iso)} — toque para registrar`}
                               style={{
                                 aspectRatio: "1", borderRadius: 5, padding: "4px 3px", cursor: "pointer",
-                                background: cel.total > 0 ? `rgba(75,101,82,${intensidade})` : "#FFFDF8",
+                                background: fundo,
                                 border: "1px solid var(--paper-line)",
                                 display: "flex", flexDirection: "column", justifyContent: "space-between",
                                 transition: "transform 0.1s",
@@ -3991,9 +4020,10 @@ function PrimeStepApp() {
                                   <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 700, color: "var(--ink)" }}>{cel.pares}p</span>
                                 )}
                               </div>
-                              {cel.total > 0 && (
-                                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 700, color: "var(--ink)", lineHeight: 1.1 }}>
-                                  {cel.total >= 1000 ? `${(cel.total / 1000).toFixed(1)}k` : cel.total.toFixed(0)}
+                              {temMovimento && (
+                                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 700, color: valorDia < 0 ? "var(--rust)" : "var(--ink)", lineHeight: 1.1 }}>
+                                  {Math.abs(valorDia) >= 1000 ? `${(valorDia / 1000).toFixed(1)}k` : valorDia.toFixed(0)}
+                                  {cel.semCusto > 0 && calModo === "lucro" ? "*" : ""}
                                 </span>
                               )}
                             </div>
@@ -4004,7 +4034,12 @@ function PrimeStepApp() {
                   })}
                   {melhorSemanaMes && melhorSemanaMes.total > 0 && (
                     <div style={{ marginTop: 10, fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--green)", fontWeight: 600 }}>
-                      🏆 Melhor semana do mês: semana {melhorSemanaMes.numero} — {formatBRL(melhorSemanaMes.total)}
+                      🏆 Melhor semana do mês: semana {melhorSemanaMes.numero} — {formatBRL(melhorSemanaMes.total)} faturados, {formatBRL(melhorSemanaMes.lucro)} de lucro real
+                    </div>
+                  )}
+                  {calModo === "lucro" && (
+                    <div style={{ marginTop: 6, fontFamily: "Inter, sans-serif", fontSize: 11, color: "var(--muted)", lineHeight: 1.45 }}>
+                      Lucro real do dia = vendas − terceirização − entrega − outras despesas lançadas no dia. Vermelho = dia com mais gasto que lucro. * = tem venda sem custo lançado, então o lucro pode estar maior do que é.
                     </div>
                   )}
                 </LedgerCard>
@@ -4012,7 +4047,7 @@ function PrimeStepApp() {
                 {/* Faturamento semana a semana */}
                 <LedgerCard style={{ padding: "16px 16px 14px" }}>
                   <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
-                    Faturamento por semana — {monthLabel(monthFilter)}
+                    Faturamento e lucro real por semana — {monthLabel(monthFilter)}
                   </span>
                   <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
                     {resumoSemanas.map((sem, i) => {
@@ -4036,12 +4071,19 @@ function PrimeStepApp() {
                                 {String(sem.inicio).padStart(2, "0")}/{mm} a {String(sem.fim).padStart(2, "0")}/{mm}
                               </span>
                             </span>
-                            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 700, color: sem.total > 0 ? "var(--green)" : "var(--muted)" }}>
-                              {formatBRL(sem.total)}
+                            <span style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+                              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, fontWeight: 600, color: "var(--muted)" }}>
+                                faturou {formatBRL(sem.total)}
+                              </span>
+                              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 700, color: sem.lucro > 0 ? "var(--green)" : sem.lucro < 0 ? "var(--rust)" : "var(--muted)" }}>
+                                lucro {formatBRL(sem.lucro)}
+                              </span>
                             </span>
                           </div>
+                          {/* Barra: o tamanho é o faturamento; a parte verde é o que sobrou de lucro real. */}
                           <div style={{ height: 10, background: "#EFEBE1", borderRadius: 4, overflow: "hidden", marginBottom: 6 }}>
-                            <div style={{ width: `${(sem.total / maxSemana) * 100}%`, height: "100%", background: isMelhor ? "var(--green)" : "var(--ink)", borderRadius: 4 }} />
+                            <div style={{ width: `${(sem.total / maxSemana) * 100}%`, height: "100%", background: "var(--ink)", opacity: 0.25, borderRadius: 4, position: "relative" }} />
+                            <div style={{ width: `${(Math.max(0, sem.lucro) / maxSemana) * 100}%`, height: "100%", background: "var(--green)", borderRadius: 4, marginTop: -10 }} />
                           </div>
                           {futura ? (
                             <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
@@ -4050,6 +4092,16 @@ function PrimeStepApp() {
                           ) : (
                           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11.5, color: "var(--muted)" }}>
                             <span>{sem.qtd} venda{sem.qtd === 1 ? "" : "s"} · {labelPares(sem.pares)}</span>
+                            {sem.total > 0 && (
+                              <span>
+                                margem {fmtPct((sem.lucro / sem.total) * 100)} · custos das vendas {formatBRL(sem.total - sem.lucroVendas)}{sem.gastos ? ` · outras despesas ${formatBRL(sem.gastos)}` : ""}
+                              </span>
+                            )}
+                            {sem.semCusto > 0 && (
+                              <span style={{ color: "var(--rust)", fontWeight: 600 }}>
+                                {sem.semCusto} venda{sem.semCusto === 1 ? "" : "s"} sem custo lançado
+                              </span>
+                            )}
                             <span>{totalMesSemanas ? fmtPct((sem.total / totalMesSemanas) * 100) : "0%"} do mês</span>
                             {variacao !== null && (
                               <span style={{ color: variacao >= 0 ? "var(--green)" : "var(--rust)", fontWeight: 600 }}>
@@ -4067,11 +4119,10 @@ function PrimeStepApp() {
                       );
                     })}
                   </div>
-                  {alvoMes && (
-                    <div style={{ marginTop: 10, fontFamily: "Inter, sans-serif", fontSize: 11, color: "var(--muted)" }}>
-                      Meta da semana = meta do mês dividida pelos dias, proporcional aos dias de cada semana.
-                    </div>
-                  )}
+                  <div style={{ marginTop: 10, fontFamily: "Inter, sans-serif", fontSize: 11, color: "var(--muted)", lineHeight: 1.45 }}>
+                    Lucro real = faturamento − descontos − terceirização − entregas − outras despesas lançadas na semana. A barra cinza é o faturamento; a parte verde é o que sobrou.
+                    {alvoMes ? " Meta da semana = meta do mês dividida pelos dias, proporcional aos dias de cada semana." : ""}
+                  </div>
                 </LedgerCard>
 
                 <LedgerCard style={{ padding: "16px 16px 14px" }}>
