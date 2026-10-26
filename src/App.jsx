@@ -99,6 +99,20 @@ const CATEGORIAS_DESPESA = ["Produtos e insumos", "Entregas", "Tráfego pago", "
 const ORIGENS_CLIENTE = ["Tráfego", "Instagram", "Facebook", "WhatsApp", "Pessoal", "Indicação"];
 
 // Serviços que não representam um par de tênis (não entram na sugestão de pares).
+// ---------- Regras de preço ----------
+// Higienização Prime por quantidade de pares (preço total). De 4 pares em diante, cada par sai a R$ 55.
+const PRECO_HIGIENIZACAO_POR_QTD = { 1: 65, 2: 120, 3: 170 };
+const PRECO_HIGIENIZACAO_4_MAIS = 55;
+function precoTabelaHigienizacao(qtd) {
+  const q = Math.max(1, parseInt(qtd, 10) || 1);
+  return PRECO_HIGIENIZACAO_POR_QTD[q] != null ? PRECO_HIGIENIZACAO_POR_QTD[q] : q * PRECO_HIGIENIZACAO_4_MAIS;
+}
+// Taxa de entrega por região e a partir de quantos pares o frete é grátis.
+const TAXAS_ENTREGA = [{ label: "Perto", valor: 15 }, { label: "Longe", valor: 25 }];
+const FRETE_GRATIS_A_PARTIR_DE_PARES = 3;
+// Serviço terceirizado: margem mínima (cobrar pelo menos o dobro do que a sapataria cobra).
+const MARGEM_MINIMA_TERCEIRIZADO = 0.5;
+
 const SERVICOS_SEM_PAR = ["Taxa de Entrega", "Tingir roupa"];
 
 // Junta no mesmo serviço os nomes digitados de jeitos diferentes ("tingir roupa", "TINGIR moletom"...).
@@ -687,7 +701,7 @@ const inputStyle = {
 
 // ---------- Modal form for Venda / Despesa ----------
 function novoItemServico() {
-  return { itemId: uid(), sel: CATALOGO_SERVICOS[0].nome, servico: CATALOGO_SERVICOS[0].nome, precoUnit: String(CATALOGO_SERVICOS[0].valor), quantidade: 1 };
+  return { itemId: uid(), sel: CATALOGO_SERVICOS[0].nome, servico: CATALOGO_SERVICOS[0].nome, precoUnit: String(CATALOGO_SERVICOS[0].valor), quantidade: 1, tabela: CATALOGO_SERVICOS[0].nome === "Higienização Prime" };
 }
 
 function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastrarCliente = false, entregadores = [] }) {
@@ -743,6 +757,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
   const [error, setError] = useState("");
 
   function itemSubtotal(it) {
+    if (it.tabela && it.sel === "Higienização Prime") return precoTabelaHigienizacao(it.quantidade);
     const preco = parseFloat(String(it.precoUnit).replace(",", ".")) || 0;
     const qtd = parseInt(it.quantidade, 10) || 0;
     return preco * qtd;
@@ -788,7 +803,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
       updateItem(itemId, { sel: "custom", servico: "" });
     } else {
       const item = CATALOGO_SERVICOS.find((s) => s.nome === nomeSel);
-      updateItem(itemId, { sel: nomeSel, servico: item.nome, precoUnit: String(item.valor) });
+      updateItem(itemId, { sel: nomeSel, servico: item.nome, precoUnit: String(item.valor), tabela: item.nome === "Higienização Prime" });
     }
   }
   function addItem() {
@@ -989,11 +1004,36 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                           ))}
                           <option value="custom">Outro (personalizado)</option>
                         </select>
-                        {it.sel !== "custom" ? (
+                        {it.sel === "Higienização Prime" && (
+                          <span style={{ fontSize: 11.5, color: "var(--ink)", lineHeight: 1.4 }}>
+                            Tabela: 1 par {formatBRL(precoTabelaHigienizacao(1))} · 2 por {formatBRL(precoTabelaHigienizacao(2))} · 3 por {formatBRL(precoTabelaHigienizacao(3))} · 4 ou mais {formatBRL(PRECO_HIGIENIZACAO_4_MAIS)} cada
+                            {!it.tabela && (
+                              <button type="button" onClick={() => updateItem(it.itemId, { tabela: true })} style={{ marginLeft: 6, border: "1px solid var(--paper-line)", background: "#FFFDF8", borderRadius: 4, padding: "1px 8px", fontSize: 11.5, cursor: "pointer", color: "var(--ink)" }}>
+                                usar tabela
+                              </button>
+                            )}
+                            {!it.tabela && itemSubtotal(it) < precoTabelaHigienizacao(it.quantidade) - 0.009 && (
+                              <span style={{ display: "block", color: "var(--rust)", fontWeight: 600 }}>
+                                Abaixo da tabela ({formatBRL(precoTabelaHigienizacao(it.quantidade) - itemSubtotal(it))} de desconto).
+                              </span>
+                            )}
+                          </span>
+                        )}
+                        {it.sel === "Taxa de Entrega" && (
+                          <span style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", fontSize: 11.5, color: "var(--muted)" }}>
+                            {TAXAS_ENTREGA.map((t) => (
+                              <button key={t.label} type="button" onClick={() => updateItem(it.itemId, { precoUnit: String(t.valor) })} style={{ border: "1px solid var(--paper-line)", background: Number(String(it.precoUnit).replace(",", ".")) === t.valor ? "var(--ink)" : "#FFFDF8", color: Number(String(it.precoUnit).replace(",", ".")) === t.valor ? "var(--paper)" : "var(--ink)", borderRadius: 4, padding: "3px 10px", fontSize: 12, cursor: "pointer" }}>
+                                {t.label} {formatBRL(t.valor)}
+                              </button>
+                            ))}
+                            <span>Frete grátis a partir de {FRETE_GRATIS_A_PARTIR_DE_PARES} pares.</span>
+                          </span>
+                        )}
+                        {it.sel !== "custom" && it.sel !== "Higienização Prime" && it.sel !== "Taxa de Entrega" ? (
                           <span style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.4 }}>
                             {CATALOGO_SERVICOS.find((s) => s.nome === it.sel)?.descricao}
                           </span>
-                        ) : (
+                        ) : it.sel !== "custom" ? null : (
                           <input
                             type="text"
                             value={it.servico}
@@ -1008,8 +1048,8 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                             <input
                               type="text"
                               inputMode="decimal"
-                              value={it.precoUnit}
-                              onChange={(e) => updateItem(it.itemId, { precoUnit: e.target.value })}
+                              value={it.tabela && it.sel === "Higienização Prime" ? String(Math.round((itemSubtotal(it) / (parseInt(it.quantidade, 10) || 1)) * 100) / 100).replace(".", ",") : it.precoUnit}
+                              onChange={(e) => updateItem(it.itemId, { precoUnit: e.target.value, tabela: false })}
                               placeholder="0,00"
                               style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }}
                             />
@@ -1181,6 +1221,41 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                           />
                         </Field>
                       </div>
+                      {(() => {
+                        // Alertas de margem: entrega paga sem cobrar taxa e serviço terceirizado barato demais.
+                        const avisos = [];
+                        const temTaxa = itens.some((x) => x.sel === "Taxa de Entrega" || /taxa de entrega/i.test(x.servico || ""));
+                        const ent = parseValor(custoEntrega);
+                        if (ent > 0 && !temTaxa && paresValor < FRETE_GRATIS_A_PARTIR_DE_PARES) {
+                          avisos.push(
+                            <span key="ent">
+                              Você vai pagar {formatBRL(ent)} de entrega e não está cobrando taxa. Frete grátis só a partir de {FRETE_GRATIS_A_PARTIR_DE_PARES} pares.{" "}
+                              {TAXAS_ENTREGA.map((t) => (
+                                <button key={t.label} type="button" onClick={() => setItens((prev) => [...prev, { itemId: uid(), sel: "Taxa de Entrega", servico: "Taxa de Entrega", precoUnit: String(t.valor), quantidade: 1 }])} style={{ marginLeft: 4, border: "1px solid var(--rust)", background: "#FFFDF8", color: "var(--rust)", borderRadius: 4, padding: "1px 8px", fontSize: 11.5, cursor: "pointer", fontWeight: 600 }}>
+                                  + taxa {t.label.toLowerCase()} {formatBRL(t.valor)}
+                                </button>
+                              ))}
+                            </span>
+                          );
+                        }
+                        const cst = parseValor(custo);
+                        const pagoCliente = valorPagoManual ? parseValor(valorPago) : total;
+                        if (cst > 0 && terceirizado && pagoCliente > 0) {
+                          const margemServ = (pagoCliente - cst - ent) / pagoCliente;
+                          if (margemServ < MARGEM_MINIMA_TERCEIRIZADO) {
+                            avisos.push(
+                              <span key="marg">
+                                Margem de {fmtPct(margemServ * 100)} neste serviço terceirizado. Pela regra de cobrar no mínimo o dobro do que a sapataria cobra, o preço deveria ser pelo menos {formatBRL(cst * 2 + ent)}.
+                              </span>
+                            );
+                          }
+                        }
+                        return avisos.length ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--rust)", borderRadius: 5, padding: "8px 10px", fontFamily: "Inter, sans-serif", fontSize: 12, color: "var(--rust)", lineHeight: 1.45 }}>
+                            {avisos}
+                          </div>
+                        ) : null;
+                      })()}
                       {parseValor(custo) > 0 && (
                         <Field label="Quem fez o serviço (terceirizado)">
                           <select id="venda-terceirizado" value={terceirizado} onChange={(e) => setTerceirizado(e.target.value)} style={inputStyle}>
