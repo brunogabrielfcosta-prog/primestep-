@@ -3027,6 +3027,7 @@ function PrimeStepApp() {
   const [pagamentosEntregador, setPagamentosEntregador] = useState([]);
   const [pagamentosEntregadorOk, setPagamentosEntregadorOk] = useState(true);
   const [pagamentosTerceirizado, setPagamentosTerceirizado] = useState([]);
+  const [mostrarUsuarios, setMostrarUsuarios] = useState(false);
   const [pagamentosTerceirizadoOk, setPagamentosTerceirizadoOk] = useState(true);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
@@ -3649,10 +3650,21 @@ function PrimeStepApp() {
               <input type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
             </label>
             <button
+              onClick={() => setMostrarUsuarios(true)}
+              title="Criar usuários e trocar sua senha"
+              style={{
+                display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 4, marginLeft: "auto",
+                border: "1px solid var(--paper-line)", background: "transparent", color: "var(--muted)",
+                fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 12, cursor: "pointer",
+              }}
+            >
+              Usuários
+            </button>
+            <button
               onClick={() => supabase.auth.signOut()}
               title="Sair do sistema"
               style={{
-                display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 4, marginLeft: "auto",
+                display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 4,
                 border: "1px solid var(--paper-line)", background: "transparent", color: "var(--muted)",
                 fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 12, cursor: "pointer",
               }}
@@ -4581,6 +4593,7 @@ function PrimeStepApp() {
           onClose={() => setModal(null)}
         />
       )}
+      {mostrarUsuarios && <UsuariosModal onClose={() => setMostrarUsuarios(false)} />}
       {modal && modal.type === "cliente" && (
         <ClienteModal
           initial={modal.initial}
@@ -4622,6 +4635,130 @@ function TelaCarregando() {
   );
 }
 
+// Login por nome: "andressa" vira o e-mail interno andressa@primestep.app. E-mail completo também funciona.
+const DOMINIO_LOGIN = "primestep.app";
+function emailDoLogin(usuario) {
+  const u = String(usuario || "").trim();
+  if (u.includes("@")) return u;
+  return `${u.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, ".")}@${DOMINIO_LOGIN}`;
+}
+
+// ---------- Usuários: criar acesso por nome + senha e trocar a própria senha ----------
+function UsuariosModal({ onClose }) {
+  const [usuarios, setUsuarios] = useState(null);
+  const [nome, setNome] = useState("");
+  const [senha, setSenha] = useState("");
+  const [senha2, setSenha2] = useState("");
+  const [minha, setMinha] = useState("");
+  const [minha2, setMinha2] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [ocupado, setOcupado] = useState(false);
+
+  async function chamar(corpo) {
+    const { data, error } = await supabase.functions.invoke("usuarios", { body: corpo });
+    if (error) {
+      let texto = "Não foi possível falar com o servidor. Confira a internet.";
+      try { const j = await error.context.json(); if (j?.erro) texto = j.erro; } catch (e) { /* sem detalhes */ }
+      throw new Error(texto);
+    }
+    return data;
+  }
+  async function carregar() {
+    try { setUsuarios((await chamar({ acao: "listar" })).usuarios || []); } catch (e) { setMsg({ tom: "erro", texto: e.message }); }
+  }
+  useEffect(() => { carregar(); }, []);
+
+  async function criar(e) {
+    e.preventDefault();
+    setMsg(null);
+    if (senha !== senha2) return setMsg({ tom: "erro", texto: "As duas senhas não são iguais." });
+    setOcupado(true);
+    try {
+      const r = await chamar({ acao: "criar", nome, senha });
+      setMsg({ tom: "ok", texto: `Usuário "${r.nome}" criado. Para entrar, é só digitar ${r.nome} e a senha.` });
+      setNome(""); setSenha(""); setSenha2("");
+      carregar();
+    } catch (err) {
+      setMsg({ tom: "erro", texto: err.message });
+    }
+    setOcupado(false);
+  }
+  async function trocarSenha(e) {
+    e.preventDefault();
+    setMsg(null);
+    if (minha.length < 6) return setMsg({ tom: "erro", texto: "A senha precisa ter pelo menos 6 caracteres." });
+    if (minha !== minha2) return setMsg({ tom: "erro", texto: "As duas senhas não são iguais." });
+    setOcupado(true);
+    const { error } = await supabase.auth.updateUser({ password: minha });
+    setOcupado(false);
+    if (error) return setMsg({ tom: "erro", texto: /different|same/i.test(error.message || "") ? "A senha nova precisa ser diferente da atual." : "Não foi possível trocar a senha." });
+    setMinha(""); setMinha2("");
+    setMsg({ tom: "ok", texto: "Senha trocada. Use a nova na próxima vez que entrar." });
+  }
+
+  const rotulo = { fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 };
+  const botao = { padding: "10px 14px", borderRadius: 5, border: "none", cursor: ocupado ? "default" : "pointer", background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 13, opacity: ocupado ? 0.7 : 1 };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,20,15,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 440, maxHeight: "90vh", overflowY: "auto" }}>
+        <LedgerCard style={{ padding: 22, display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>Usuários</h3>
+            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}><X size={18} /></button>
+          </div>
+
+          <div>
+            <div style={{ ...rotulo, marginBottom: 6 }}>Quem tem acesso</div>
+            {usuarios === null ? (
+              <div style={{ fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--muted)" }}>Carregando…</div>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {usuarios.map((u) => (
+                  <span key={u.nome} style={{ border: "1px solid var(--paper-line)", borderRadius: 4, padding: "3px 9px", fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--ink)" }}>
+                    {u.nome}{u.voce ? " (você)" : ""}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <form onSubmit={criar} style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--paper-line)", paddingTop: 14 }}>
+            <div style={rotulo}>Criar usuário</div>
+            <Field label="Nome de usuário">
+              <input value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Ex.: andressa" autoCapitalize="none" autoCorrect="off" autoComplete="off" style={inputStyle} />
+            </Field>
+            <Field label="Senha (mínimo 6 caracteres)">
+              <input type="password" value={senha} onChange={(e) => setSenha(e.target.value)} autoComplete="new-password" style={inputStyle} />
+            </Field>
+            <Field label="Repita a senha">
+              <input type="password" value={senha2} onChange={(e) => setSenha2(e.target.value)} autoComplete="new-password" style={inputStyle} />
+            </Field>
+            <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.4 }}>
+              Deixe a própria pessoa digitar a senha dela. Depois, ela pode trocar quando quiser, aqui mesmo.
+            </span>
+            <button type="submit" disabled={ocupado} style={botao}>Criar usuário</button>
+          </form>
+
+          <form onSubmit={trocarSenha} style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--paper-line)", paddingTop: 14 }}>
+            <div style={rotulo}>Trocar a minha senha</div>
+            <Field label="Senha nova">
+              <input type="password" value={minha} onChange={(e) => setMinha(e.target.value)} autoComplete="new-password" style={inputStyle} />
+            </Field>
+            <Field label="Repita a senha nova">
+              <input type="password" value={minha2} onChange={(e) => setMinha2(e.target.value)} autoComplete="new-password" style={inputStyle} />
+            </Field>
+            <button type="submit" disabled={ocupado} style={botao}>Trocar senha</button>
+          </form>
+
+          {msg && (
+            <div style={{ fontFamily: "Inter, sans-serif", fontSize: 13, color: msg.tom === "ok" ? "var(--green)" : "var(--rust)", fontWeight: 600 }}>{msg.texto}</div>
+          )}
+        </LedgerCard>
+      </div>
+    </div>
+  );
+}
+
 function TelaLogin() {
   const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
@@ -4632,14 +4769,14 @@ function TelaLogin() {
     e.preventDefault();
     setErro("");
     if (!email.trim() || !senha) {
-      setErro("Informe o e-mail e a senha.");
+      setErro("Informe o usuário e a senha.");
       return;
     }
     setEntrando(true);
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: senha });
+    const { error } = await supabase.auth.signInWithPassword({ email: emailDoLogin(email), password: senha });
     setEntrando(false);
     if (error) {
-      setErro(/invalid/i.test(error.message || "") ? "E-mail ou senha incorretos." : "Não foi possível entrar. Confira a internet e tente de novo.");
+      setErro(/invalid/i.test(error.message || "") ? "Usuário ou senha incorretos." : "Não foi possível entrar. Confira a internet e tente de novo.");
     }
   }
 
@@ -4655,8 +4792,8 @@ function TelaLogin() {
             CONTROLE FINANCEIRO
           </div>
         </div>
-        <Field label="E-mail">
-          <input id="login-email" type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
+        <Field label="Usuário">
+          <input id="login-email" type="text" autoCapitalize="none" autoCorrect="off" placeholder="Seu nome de usuário" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
         </Field>
         <Field label="Senha">
           <input id="login-senha" type="password" autoComplete="current-password" value={senha} onChange={(e) => setSenha(e.target.value)} style={inputStyle} />
