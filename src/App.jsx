@@ -2494,7 +2494,7 @@ function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSem
     const nomes = pendentes.slice(0, 3).map((v) => `${v.cliente} (${formatBRL(faltaReceber(v))})`).join(", ");
     itens.push({
       tom: "atencao",
-      texto: `${formatBRL(somaFalta(pendentes))} para receber em ${pendentes.length} venda${pendentes.length === 1 ? "" : "s"}. Cobrar: ${nomes}${pendentes.length > 3 ? " e outros" : ""}.`,
+      texto: `${formatBRL(somaFalta(pendentes))} para receber no total (todos os meses) em ${pendentes.length} venda${pendentes.length === 1 ? "" : "s"}. Cobrar: ${nomes}${pendentes.length > 3 ? " e outros" : ""}.`,
     });
   }
 
@@ -3800,7 +3800,7 @@ function PrimeStepApp() {
               <StatCard label="Receitas do mês" value={formatBRL(totalReceitas)} icon={TrendingUp} tone="up" />
               <StatCard label="Despesas do mês (com custos das vendas)" value={formatBRL(totalDespesas)} icon={TrendingDown} tone="down" />
               <StatCard label="Lucro real do mês (saldo)" value={formatBRL(saldo)} icon={Wallet} tone={saldo >= 0 ? "up" : "down"} />
-              <StatCard label="A receber (pendente)" value={formatBRL(pendentes)} icon={Clock} />
+              <StatCard label="A receber (vendas deste mês)" value={formatBRL(pendentes)} icon={Clock} />
               <StatCard label="Pares feitos no mês" value={String(paresMes)} icon={Check} />
               <StatCard label="Lucro das vendas (antes das outras despesas)" value={formatBRL(lucroVendasMes)} icon={TrendingUp} tone={lucroVendasMes >= 0 ? "up" : "down"} />
               <StatCard label="Custos das vendas" value={formatBRL(custosVendasMes)} icon={TrendingDown} tone="down" />
