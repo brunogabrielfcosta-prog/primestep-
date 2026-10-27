@@ -112,6 +112,9 @@ const TAXAS_ENTREGA = [{ label: "Perto", valor: 15 }, { label: "Longe", valor: 2
 const FRETE_GRATIS_A_PARTIR_DE_PARES = 3;
 // Serviço terceirizado: margem mínima (cobrar pelo menos o dobro do que a sapataria cobra).
 const MARGEM_MINIMA_TERCEIRIZADO = 0.5;
+// Margem do mês (lucro real ÷ faturamento): abaixo do mínimo, o sistema avisa; a meta é chegar no ideal.
+const MARGEM_MINIMA_MES = 0.4;
+const MARGEM_IDEAL_MES = 0.5;
 
 const SERVICOS_SEM_PAR = ["Taxa de Entrega", "Tingir roupa"];
 
@@ -551,12 +554,14 @@ async function loadMetas() {
   }
   const out = {};
   (data || []).forEach((r) => {
-    out[r.mes] = { meta: Number(r.meta), superMeta: Number(r.super_meta) };
+    out[r.mes] = { meta: Number(r.meta), superMeta: Number(r.super_meta), metaLucro: r.meta_lucro != null ? Number(r.meta_lucro) : null };
   });
   return out;
 }
 async function upsertMeta(mes, m) {
-  const { error } = await supabase.from("metas").upsert({ mes, meta: m.meta, super_meta: m.superMeta });
+  let { error } = await supabase.from("metas").upsert({ mes, meta: m.meta, super_meta: m.superMeta, meta_lucro: m.metaLucro != null ? m.metaLucro : null });
+  // Sem a coluna da meta de lucro no banco, salva o resto.
+  if (error && (error.code === "PGRST204" || /column/i.test(error.message || ""))) ({ error } = await supabase.from("metas").upsert({ mes, meta: m.meta, super_meta: m.superMeta }));
   if (error) avisarErro("salvar a meta", error);
 }
 
@@ -1925,6 +1930,87 @@ function MetaAlvoCard({ titulo, info, faturado, analise, cor }) {
   );
 }
 
+// Lucro real do mês e quanto dele já está no caixa (tirando o que os clientes ainda devem).
+function lucroDoMes(vendas, despesas, mesKey, hoje = new Date()) {
+  const vs = vendas.filter((v) => v.data?.startsWith(mesKey));
+  const ds = despesas.filter((d) => d.data?.startsWith(mesKey));
+  const recebido = vs.reduce((s, v) => s + valorRecebido(v), 0);
+  const custos = custosDasVendas(vs).total;
+  const outras = ds.reduce((s, d) => s + Number(d.valor || 0), 0);
+  const lucro = recebido - custos - outras;
+  const aReceber = somaFalta(vs);
+  const [y, m] = mesKey.split("-").map(Number);
+  const diasNoMes = new Date(y, m, 0).getDate();
+  const mesHoje = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}`;
+  const situacao = mesKey === mesHoje ? "atual" : mesKey < mesHoje ? "passado" : "futuro";
+  const dias = situacao === "atual" ? hoje.getDate() : situacao === "passado" ? diasNoMes : 0;
+  const projecao = situacao === "atual" && dias ? (lucro / dias) * diasNoMes : lucro;
+  const margem = recebido > 0 ? lucro / recebido : null;
+  return { lucro, noCaixa: lucro - aReceber, aReceber, custos, outras, recebido, projecao, situacao, diasNoMes, dias, margem };
+}
+
+function LucroMetaCard({ vendas, despesas, mesKey, mesLabel, alvo, onEditar }) {
+  const l = lucroDoMes(vendas, despesas, mesKey);
+  const meta = alvo?.metaLucro || null;
+  const pct = meta ? (l.lucro / meta) * 100 : null;
+  const pctCaixa = meta ? (Math.max(0, l.noCaixa) / meta) * 100 : null;
+  const rotulo = { fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 };
+  return (
+    <LedgerCard style={{ padding: "16px 16px 14px", fontFamily: "Inter, sans-serif" }}>
+      <div style={{ ...rotulo, marginBottom: 6 }}>Lucro real de {mesLabel}</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 26, fontWeight: 700, color: l.lucro >= 0 ? "var(--green)" : "var(--rust)" }}>{formatBRL(l.lucro)}</span>
+        {meta ? (
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--muted)" }}>de {formatBRL(meta)} · {fmtPct(pct)}</span>
+        ) : (
+          <button onClick={onEditar} style={{ border: "1px solid var(--paper-line)", background: "transparent", borderRadius: 4, padding: "3px 10px", fontSize: 11.5, cursor: "pointer", color: "var(--ink)", fontWeight: 600 }}>
+            Definir meta de lucro
+          </button>
+        )}
+      </div>
+      {meta && (
+        <div style={{ height: 14, background: "#EFEBE1", borderRadius: 4, overflow: "hidden", marginBottom: 8 }}>
+          <div style={{ width: `${Math.min(100, Math.max(0, pct))}%`, height: "100%", background: "var(--green)", opacity: 0.35 }} />
+          <div style={{ width: `${Math.min(100, pctCaixa)}%`, height: "100%", background: "var(--green)", marginTop: -14 }} />
+        </div>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, fontSize: 12 }}>
+        <div>
+          <div style={{ color: "var(--muted)" }}>Margem (mínimo {fmtPct(MARGEM_MINIMA_MES * 100)})</div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: l.margem == null ? "var(--muted)" : l.margem < MARGEM_MINIMA_MES ? "var(--rust)" : l.margem >= MARGEM_IDEAL_MES ? "var(--green)" : "var(--ink)" }}>
+            {l.margem == null ? "—" : fmtPct(l.margem * 100)}
+          </div>
+        </div>
+        <div>
+          <div style={{ color: "var(--muted)" }}>Já no caixa</div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: l.noCaixa >= 0 ? "var(--green)" : "var(--rust)" }}>{formatBRL(l.noCaixa)}</div>
+        </div>
+        <div>
+          <div style={{ color: "var(--muted)" }}>Clientes ainda devem</div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: l.aReceber > 0 ? "var(--rust)" : "var(--ink)" }}>{formatBRL(l.aReceber)}</div>
+        </div>
+        {l.situacao === "atual" && (
+          <div>
+            <div style={{ color: "var(--muted)" }}>No ritmo, fecha em</div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: meta && l.projecao < meta ? "var(--rust)" : "var(--ink)" }}>{formatBRL(l.projecao)}</div>
+          </div>
+        )}
+        {meta && l.situacao === "atual" && l.lucro < meta && (
+          <div>
+            <div style={{ color: "var(--muted)" }}>Falta por dia</div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: "var(--ink)" }}>
+              {formatBRL((meta - l.lucro) / Math.max(1, l.diasNoMes - l.dias + 1))}
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.45 }}>
+        Lucro real = o que as vendas renderam − terceirização − entregas − todas as despesas do mês. Margem = lucro real ÷ faturamento: abaixo de {fmtPct(MARGEM_MINIMA_MES * 100)} é sinal de alerta, e o ideal é {fmtPct(MARGEM_IDEAL_MES * 100)} ou mais. "Já no caixa" tira o que os clientes ainda não pagaram. A barra clara é o lucro; a escura, o que já entrou.
+      </div>
+    </LedgerCard>
+  );
+}
+
 function MetaPainel({ analise, alvo, mesLabel, onEditar }) {
   if (!alvo) {
     return (
@@ -2022,6 +2108,7 @@ function MetaPainel({ analise, alvo, mesLabel, onEditar }) {
 function MetaModal({ mesLabel, initial, onSave, onClose }) {
   const [meta, setMeta] = useState(initial?.meta != null ? String(initial.meta) : "");
   const [superMeta, setSuperMeta] = useState(initial?.superMeta != null ? String(initial.superMeta) : "");
+  const [metaLucro, setMetaLucro] = useState(initial?.metaLucro != null ? String(initial.metaLucro) : "");
   const [error, setError] = useState("");
 
   function handleSubmit(e) {
@@ -2036,7 +2123,8 @@ function MetaModal({ mesLabel, initial, onSave, onClose }) {
       setError("A super meta precisa ser maior ou igual à meta.");
       return;
     }
-    onSave({ meta: m, superMeta: sm });
+    const ml = parseFloat(String(metaLucro).replace(/\./g, "").replace(",", "."));
+    onSave({ meta: m, superMeta: sm, metaLucro: ml > 0 ? ml : null });
   }
 
   return (
@@ -2058,6 +2146,9 @@ function MetaModal({ mesLabel, initial, onSave, onClose }) {
             </Field>
             <Field label="Super meta (R$)">
               <input type="text" inputMode="decimal" value={superMeta} onChange={(e) => setSuperMeta(e.target.value)} placeholder="5000" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+            </Field>
+            <Field label="Meta de lucro real (R$)">
+              <input type="text" inputMode="decimal" value={metaLucro} onChange={(e) => setMetaLucro(e.target.value)} placeholder="3500" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
             </Field>
             {error && <div style={{ color: "var(--rust)", fontSize: 12.5, fontFamily: "Inter, sans-serif" }}>{error}</div>}
             <button
@@ -2353,7 +2444,7 @@ function ClientesTab({ clientes, clientesOk, vendas, onAbrir, onExcluir, onImpor
 // ---------- Recado do dia ----------
 // Junta o que pede atenção hoje: ritmo da meta, ontem, cobranças, pares em processo,
 // aniversariantes e clientes para chamar de volta. Recalculado sempre com os dados atuais.
-function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador = [], contasTerceirizado = [] }) {
+function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador = [], contasTerceirizado = [], lucroMes = null }) {
   const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const hojeIso = iso(hoje);
   const ontem = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - 1);
@@ -2454,6 +2545,24 @@ function montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSem
     itens.push({ tom: "info", texto: `Hoje é ${DIAS_SEMANA_EXT[hoje.getDay()].toLowerCase()}, o dia da semana que mais vende. Bom dia para postar e responder rápido.` });
   }
 
+  // Margem do mês abaixo do mínimo
+  if (lucroMes && lucroMes.margem != null && lucroMes.recebido >= 500 && lucroMes.margem < MARGEM_MINIMA_MES) {
+    itens.unshift({
+      tom: "atencao",
+      texto: `Margem do mês em ${fmtPct(lucroMes.margem * 100)}, abaixo do mínimo de ${fmtPct(MARGEM_MINIMA_MES * 100)}. Confira custos de terceirização, entregas sem taxa e despesas lançadas.`,
+    });
+  }
+  // Lucro real do mês contra a meta de lucro
+  if (lucroMes && lucroMes.meta) {
+    const l = lucroMes;
+    const pct = (l.lucro / l.meta) * 100;
+    itens.unshift({
+      tom: l.lucro >= l.meta ? "ok" : l.projecao >= l.meta ? "info" : "atencao",
+      texto: l.lucro >= l.meta
+        ? `Meta de lucro batida: ${formatBRL(l.lucro)} de lucro real (${formatBRL(l.noCaixa)} já no caixa).`
+        : `Lucro real do mês: ${formatBRL(l.lucro)} de ${formatBRL(l.meta)} (${fmtPct(pct)}), ${formatBRL(l.noCaixa)} já no caixa. No ritmo, fecha em ${formatBRL(l.projecao)}.`,
+    });
+  }
   // Conta do entregador
   contasEntregador
     .filter((c) => c.falta > 0.009)
@@ -3496,8 +3605,9 @@ function PrimeStepApp() {
     const hoje = new Date();
     const mesHoje = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}`;
     const alvo = metas[mesHoje] || METAS_PADRAO[mesHoje] || null;
-    return montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador, contasTerceirizado });
-  }, [vendas, pedidos, clientes, metas, melhorDiaSemana, contasEntregador, contasTerceirizado]);
+    const lucroMes = { ...lucroDoMes(vendas, despesas, mesHoje, hoje), meta: alvo?.metaLucro || null };
+    return montarRecadoDoDia({ vendas, pedidos, clientes, alvo, hoje, melhorDiaSemana, contasEntregador, contasTerceirizado, lucroMes });
+  }, [vendas, despesas, pedidos, clientes, metas, melhorDiaSemana, contasEntregador, contasTerceirizado]);
 
   // Grade de calendário do mês selecionado, com o total vendido e os pares de cada dia.
   const calendarioSemanas = useMemo(() => {
@@ -3775,12 +3885,15 @@ function PrimeStepApp() {
             )}
 
             {tab === "meta" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              <LucroMetaCard vendas={vendas} despesas={despesas} mesKey={monthFilter} mesLabel={monthLabel(monthFilter)} alvo={alvoMes} onEditar={() => setModal({ type: "meta" })} />
               <MetaPainel
                 analise={analiseMeta}
                 alvo={alvoMes}
                 mesLabel={monthLabel(monthFilter)}
                 onEditar={() => setModal({ type: "meta" })}
               />
+              </div>
             )}
 
             {tab === "analises" && (
