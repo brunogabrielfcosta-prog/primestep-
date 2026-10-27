@@ -3028,6 +3028,10 @@ function PrimeStepApp() {
   const [pagamentosEntregadorOk, setPagamentosEntregadorOk] = useState(true);
   const [pagamentosTerceirizado, setPagamentosTerceirizado] = useState([]);
   const [mostrarUsuarios, setMostrarUsuarios] = useState(false);
+  const [ehAdmin, setEhAdmin] = useState(false);
+  useEffect(() => {
+    supabase.functions.invoke("usuarios", { body: { acao: "eu" } }).then(({ data }) => setEhAdmin(data?.admin === true)).catch(() => {});
+  }, []);
   const [pagamentosTerceirizadoOk, setPagamentosTerceirizadoOk] = useState(true);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
@@ -3651,14 +3655,14 @@ function PrimeStepApp() {
             </label>
             <button
               onClick={() => setMostrarUsuarios(true)}
-              title="Criar usuários e trocar sua senha"
+              title={ehAdmin ? "Criar usuários e trocar sua senha" : "Trocar sua senha"}
               style={{
                 display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 4, marginLeft: "auto",
                 border: "1px solid var(--paper-line)", background: "transparent", color: "var(--muted)",
                 fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 12, cursor: "pointer",
               }}
             >
-              Usuários
+              {ehAdmin ? "Usuários" : "Minha senha"}
             </button>
             <button
               onClick={() => supabase.auth.signOut()}
@@ -4593,7 +4597,7 @@ function PrimeStepApp() {
           onClose={() => setModal(null)}
         />
       )}
-      {mostrarUsuarios && <UsuariosModal onClose={() => setMostrarUsuarios(false)} />}
+      {mostrarUsuarios && <UsuariosModal admin={ehAdmin} onClose={() => setMostrarUsuarios(false)} />}
       {modal && modal.type === "cliente" && (
         <ClienteModal
           initial={modal.initial}
@@ -4644,8 +4648,9 @@ function emailDoLogin(usuario) {
 }
 
 // ---------- Usuários: criar acesso por nome + senha e trocar a própria senha ----------
-function UsuariosModal({ onClose }) {
+function UsuariosModal({ admin, onClose }) {
   const [usuarios, setUsuarios] = useState(null);
+  const [novoAdmin, setNovoAdmin] = useState(false);
   const [nome, setNome] = useState("");
   const [senha, setSenha] = useState("");
   const [senha2, setSenha2] = useState("");
@@ -4666,7 +4671,7 @@ function UsuariosModal({ onClose }) {
   async function carregar() {
     try { setUsuarios((await chamar({ acao: "listar" })).usuarios || []); } catch (e) { setMsg({ tom: "erro", texto: e.message }); }
   }
-  useEffect(() => { carregar(); }, []);
+  useEffect(() => { if (admin) carregar(); }, [admin]);
 
   async function criar(e) {
     e.preventDefault();
@@ -4674,9 +4679,9 @@ function UsuariosModal({ onClose }) {
     if (senha !== senha2) return setMsg({ tom: "erro", texto: "As duas senhas não são iguais." });
     setOcupado(true);
     try {
-      const r = await chamar({ acao: "criar", nome, senha });
+      const r = await chamar({ acao: "criar", nome, senha, admin: novoAdmin });
       setMsg({ tom: "ok", texto: `Usuário "${r.nome}" criado. Para entrar, é só digitar ${r.nome} e a senha.` });
-      setNome(""); setSenha(""); setSenha2("");
+      setNome(""); setSenha(""); setSenha2(""); setNovoAdmin(false);
       carregar();
     } catch (err) {
       setMsg({ tom: "erro", texto: err.message });
@@ -4703,10 +4708,11 @@ function UsuariosModal({ onClose }) {
       <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 440, maxHeight: "90vh", overflowY: "auto" }}>
         <LedgerCard style={{ padding: 22, display: "flex", flexDirection: "column", gap: 16 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>Usuários</h3>
+            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>{admin ? "Usuários" : "Minha senha"}</h3>
             <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}><X size={18} /></button>
           </div>
 
+          {admin && (<>
           <div>
             <div style={{ ...rotulo, marginBottom: 6 }}>Quem tem acesso</div>
             {usuarios === null ? (
@@ -4715,7 +4721,7 @@ function UsuariosModal({ onClose }) {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {usuarios.map((u) => (
                   <span key={u.nome} style={{ border: "1px solid var(--paper-line)", borderRadius: 4, padding: "3px 9px", fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--ink)" }}>
-                    {u.nome}{u.voce ? " (você)" : ""}
+                    {u.nome}{u.admin ? " · administrador" : ""}{u.voce ? " (você)" : ""}
                   </span>
                 ))}
               </div>
@@ -4733,11 +4739,16 @@ function UsuariosModal({ onClose }) {
             <Field label="Repita a senha">
               <input type="password" value={senha2} onChange={(e) => setSenha2(e.target.value)} autoComplete="new-password" style={inputStyle} />
             </Field>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontFamily: "Inter, sans-serif", fontSize: 12.5, color: "var(--ink)" }}>
+              <input type="checkbox" checked={novoAdmin} onChange={(e) => setNovoAdmin(e.target.checked)} />
+              Administrador (pode criar usuários)
+            </label>
             <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.4 }}>
-              Deixe a própria pessoa digitar a senha dela. Depois, ela pode trocar quando quiser, aqui mesmo.
+              Deixe a própria pessoa digitar a senha dela. Depois, ela pode trocar quando quiser em "Minha senha".
             </span>
             <button type="submit" disabled={ocupado} style={botao}>Criar usuário</button>
           </form>
+          </>)}
 
           <form onSubmit={trocarSenha} style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--paper-line)", paddingTop: 14 }}>
             <div style={rotulo}>Trocar a minha senha</div>
