@@ -90,6 +90,11 @@ const CATALOGO_SERVICOS = [
 // Conta do entregador: entregas a partir desta data entram no "a pagar". O que veio antes já foi acertado.
 const INICIO_CONTA_ENTREGADOR = "2026-10-23";
 const ENTREGADOR_PADRAO = "Gabriel";
+// Entregadores conhecidos. Com valor por corrida, escolher o entregador já preenche o custo da entrega.
+const ENTREGADORES = [
+  { nome: "Gabriel", valorCorrida: null },
+  { nome: "Kauã", valorCorrida: 20 }, // de carro
+];
 // Conta do terceirizado: serviços terceirizados a partir desta data entram no "a pagar" da sapataria.
 const INICIO_CONTA_TERCEIRIZADO = "2026-10-26";
 const TERCEIRIZADOS = ["Sapataria do Futuro", "Sapataria América"];
@@ -324,7 +329,8 @@ function custosDasVendas(lista) {
 // Entregas que cada entregador fez (lançadas nas vendas ou em Despesas › Entregas) menos o que já foi pago.
 // O pagamento abate as entregas mais antigas primeiro; o que sobra é o que falta pagar.
 function chaveEntregador(nome) {
-  return String(nome || "").trim().toLowerCase();
+  // "Kaua" e "Kauã" contam como a mesma pessoa.
+  return semAcento(nome);
 }
 function contaDosEntregadores(vendas, despesas, pagamentos) {
   const contas = {};
@@ -743,7 +749,7 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
   const [entrada, setEntrada] = useState(fmtCampo(initial?.entrada));
   // Entregador: na venda nova já vem o de sempre; na despesa só preenche se for entrega feita por ele.
   const [entregador, setEntregador] = useState(initial?.entregador || (isVenda && !initial?.id ? ENTREGADOR_PADRAO : ""));
-  const nomesEntregadores = [...new Set([ENTREGADOR_PADRAO, ...entregadores].filter(Boolean))];
+  const nomesEntregadores = [...new Set([...ENTREGADORES.map((e) => e.nome), ...entregadores].filter(Boolean))];
   // Venda nova: onde o tênis está agora (entra no controle do Operacional).
   const [ondeEsta, setOndeEsta] = useState("primestep");
   // Quem fez o serviço terceirizado (o custo vira "a pagar" para a sapataria).
@@ -1211,6 +1217,25 @@ function EntryModal({ type, initial, onSave, onClose, clientes = [], podeCadastr
                         </Field>
                         <Field label="Entrega (custo)">
                           <input id="venda-entrega" type="text" inputMode="decimal" value={custoEntrega} onChange={(e) => setCustoEntrega(e.target.value)} placeholder="0,00" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
+                          <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                            {ENTREGADORES.map((en) => {
+                              const ativo = chaveEntregador(entregador) === chaveEntregador(en.nome) && parseValor(custoEntrega) > 0;
+                              return (
+                                <button
+                                  key={en.nome}
+                                  type="button"
+                                  title={en.valorCorrida ? `${en.nome}: ${formatBRL(en.valorCorrida)} por corrida` : `Entrega feita por ${en.nome}`}
+                                  onClick={() => {
+                                    setEntregador(en.nome);
+                                    if (en.valorCorrida) setCustoEntrega(fmtCampo(en.valorCorrida));
+                                  }}
+                                  style={{ border: "1px solid var(--paper-line)", background: ativo ? "var(--ink)" : "#FFFDF8", color: ativo ? "var(--paper)" : "var(--ink)", borderRadius: 4, padding: "2px 8px", fontSize: 11.5, cursor: "pointer", fontFamily: "Inter, sans-serif" }}
+                                >
+                                  {en.nome}{en.valorCorrida ? ` · ${formatBRL(en.valorCorrida)}` : ""}
+                                </button>
+                              );
+                            })}
+                          </span>
                         </Field>
                         <Field label={status === "pago" ? "Valor pago pelo cliente" : "Valor total combinado"}>
                           <input
