@@ -95,8 +95,6 @@ const ENTREGADORES = [
   { nome: "Gabriel", valorCorrida: null },
   { nome: "Kauã", valorCorrida: 20 }, // de carro
 ];
-// Conta do terceirizado: serviços terceirizados a partir desta data entram no "a pagar" da sapataria.
-const INICIO_CONTA_TERCEIRIZADO = "2026-10-26";
 const TERCEIRIZADOS = ["Sapataria do Futuro", "Sapataria América"];
 const CATEGORIAS_DESPESA = ["Produtos e insumos", "Entregas", "Tráfego pago", "Aluguel", "Salários", "Marketing", "Impostos", "Equipamentos", "Outros"];
 
@@ -359,7 +357,8 @@ function contaDosTerceirizados(vendas, pagamentos) {
     return contas[k];
   };
   vendas.forEach((v) => {
-    if (v.terceirizado && Number(v.custo || 0) > 0 && v.data >= INICIO_CONTA_TERCEIRIZADO)
+    // Toda venda com sapataria escolhida entra no "a pagar", de qualquer data, até ser paga.
+    if (v.terceirizado && Number(v.custo || 0) > 0)
       conta(v.terceirizado).entregas.push({ id: `v-${v.id}`, data: v.data, descricao: v.cliente, valor: Number(v.custo), venda: v });
   });
   (pagamentos || []).forEach((p) => conta(p.terceirizado).pagamentos.push(p));
