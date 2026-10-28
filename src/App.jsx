@@ -671,11 +671,11 @@ function LedgerCard({ children, style }) {
   );
 }
 
-function StatCard({ label, value, icon, tone }) {
+function StatCard({ label, value, icon, tone, onClick, dica }) {
   const toneColor = tone === "up" ? "var(--green)" : tone === "down" ? "var(--rust)" : "var(--ink)";
   const Icon = icon;
-  return (
-    <LedgerCard style={{ padding: "18px 20px", flex: 1, minWidth: 180 }}>
+  const card = (
+    <LedgerCard style={{ padding: "18px 20px", flex: 1, minWidth: 180, height: "100%", boxSizing: "border-box" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
         <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.09em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>
           {label}
@@ -685,7 +685,160 @@ function StatCard({ label, value, icon, tone }) {
       <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 24, fontWeight: 700, color: toneColor, letterSpacing: "-0.01em" }}>
         {value}
       </div>
+      {dica && <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11.5, color: "var(--muted)", marginTop: 6, textDecoration: "underline" }}>{dica}</div>}
     </LedgerCard>
+  );
+  if (!onClick) return card;
+  return (
+    <div role="button" tabIndex={0} onClick={onClick} onKeyDown={(e) => (e.key === "Enter" ? onClick() : null)} style={{ cursor: "pointer", flex: 1, minWidth: 180, display: "flex" }}>
+      {card}
+    </div>
+  );
+}
+
+// ---------- A receber: quem ainda não pagou ----------
+function telefoneWhats(tel) {
+  let d = String(tel || "").replace(/\D/g, "");
+  if (!d) return null;
+  if (d.length === 10 || d.length === 11) d = "55" + d;
+  return d.length >= 12 ? d : null;
+}
+function AReceberModal({ vendas, clientes, pedidos, onReceber, onAbrirVenda, onClose }) {
+  const [ordem, setOrdem] = useState("dias"); // 'dias' | 'valor'
+  const devendo = vendas.filter((v) => faltaReceber(v) > 0.009);
+  const total = somaFalta(devendo);
+  const pedidoDaVendaId = Object.fromEntries((pedidos || []).filter((p) => p.vendaId).map((p) => [p.vendaId, p]));
+  const fichaDe = (v) =>
+    clientes.find((c) => c.id === v.clienteId) || clientes.find((c) => normalizarNome(c.nome) === normalizarNome(v.cliente)) || null;
+
+  // Agrupa por cliente.
+  const grupos = {};
+  devendo.forEach((v) => {
+    const k = v.clienteId || normalizarNome(v.cliente);
+    if (!grupos[k]) grupos[k] = { nome: v.cliente, ficha: fichaDe(v), vendas: [] };
+    grupos[k].vendas.push(v);
+  });
+  const lista = Object.values(grupos).map((g) => {
+    g.vendas.sort((a, b) => (a.data < b.data ? -1 : 1));
+    g.total = somaFalta(g.vendas);
+    g.dias = Math.max(0, diasDesde(g.vendas[0].data));
+    return g;
+  });
+  lista.sort((a, b) => (ordem === "valor" ? b.total - a.total : b.dias - a.dias));
+  const faixas = [
+    ["Até 7 dias", lista.filter((g) => g.dias <= 7)],
+    ["8 a 15 dias", lista.filter((g) => g.dias > 7 && g.dias <= 15)],
+    ["Mais de 15 dias", lista.filter((g) => g.dias > 15)],
+  ];
+
+  const rotulo = { fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 };
+  const btn = (primario) => ({
+    padding: "5px 10px", borderRadius: 4, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "Inter, sans-serif", textDecoration: "none",
+    border: primario ? "none" : "1px solid var(--paper-line)", background: primario ? "var(--ink)" : "#FFFDF8", color: primario ? "var(--paper)" : "var(--ink)",
+  });
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,20,15,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 620, maxHeight: "90vh", overflowY: "auto" }}>
+        <LedgerCard style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14, fontFamily: "Inter, sans-serif" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <h3 style={{ margin: 0, fontFamily: "Manrope, sans-serif", fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>A receber</h3>
+            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}><X size={18} /></button>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 26, fontWeight: 700, color: "var(--rust)" }}>{formatBRL(total)}</span>
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+              de {lista.length} cliente{lista.length === 1 ? "" : "s"} · {devendo.length} venda{devendo.length === 1 ? "" : "s"} · todos os meses
+            </span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+            {faixas.map(([l, g]) => (
+              <div key={l} style={{ border: "1px solid var(--paper-line)", borderRadius: 5, padding: "8px 10px" }}>
+                <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{l}</div>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: l === "Mais de 15 dias" && g.length ? "var(--rust)" : "var(--ink)" }}>
+                  {formatBRL(g.reduce((s, x) => s + x.total, 0))}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>{g.length} cliente{g.length === 1 ? "" : "s"}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <span style={rotulo}>Ordenar por</span>
+            {[["dias", "Mais tempo sem pagar"], ["valor", "Maior valor"]].map(([k, l]) => (
+              <button key={k} onClick={() => setOrdem(k)} style={{ ...btn(ordem === k), padding: "3px 10px", fontSize: 11.5 }}>{l}</button>
+            ))}
+          </div>
+
+          {lista.length === 0 ? (
+            <div style={{ fontSize: 13.5, color: "var(--green)", fontWeight: 600 }}>Ninguém devendo. Tudo recebido!</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {lista.map((g) => {
+                const fone = telefoneWhats(g.ficha?.telefone);
+                const primeiroNome = String(g.nome || "").split(" ")[0];
+                const servicos = g.vendas.map((v) => resumoServicos(v) || "serviço").join("; ");
+                const texto = `Oi, ${primeiroNome}! Tudo bem? Aqui é da PrimeStep 👟 Passando pra lembrar do valor de ${formatBRL(g.total)} referente a ${servicos}. Pode ser por Pix? Qualquer dúvida, é só me chamar!`;
+                const cor = g.dias > 15 ? "var(--rust)" : g.dias > 7 ? "#B8860B" : "var(--muted)";
+                return (
+                  <div key={g.nome + g.vendas[0].id} style={{ border: "1px solid var(--paper-line)", borderLeft: `3px solid ${cor}`, borderRadius: 5, padding: "10px 12px", background: "#FFFDF8" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                      <strong style={{ fontSize: 14, color: "var(--ink)" }}>{g.nome}</strong>
+                      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: "var(--rust)" }}>{formatBRL(g.total)}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: cor, fontWeight: 600, marginTop: 2 }}>
+                      {g.dias === 0 ? "Venda de hoje" : `Sem pagar há ${g.dias} dia${g.dias === 1 ? "" : "s"}`}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+                      {g.vendas.map((v) => {
+                        const ped = pedidoDaVendaId[v.id];
+                        const entregue = ped?.etapa === "entregue";
+                        return (
+                          <div key={v.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, alignItems: "center", flexWrap: "wrap" }}>
+                            <button onClick={() => onAbrirVenda(v)} title="Abrir a venda" style={{ border: "none", background: "none", padding: 0, cursor: "pointer", textAlign: "left", color: "var(--ink)", fontSize: 12, fontFamily: "Inter, sans-serif" }}>
+                              <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "var(--muted)", marginRight: 6 }}>{formatDateBR(v.data)}</span>
+                              {resumoServicos(v) || "Venda"}
+                              {v.status === "parcial" && <span style={{ color: "var(--muted)" }}> · pagou {formatBRL(Number(v.entrada || 0))}</span>}
+                              {ped && (
+                                <span style={{ color: entregue ? "var(--rust)" : "var(--muted)", fontWeight: entregue ? 600 : 400 }}>
+                                  {" · "}{entregue ? "já entregue" : ped.etapa === "terceirizado" ? "no terceirizado" : "ainda com vocês"}
+                                </span>
+                              )}
+                            </button>
+                            <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{formatBRL(faltaReceber(v))}</span>
+                              <button
+                                style={btn(false)}
+                                onClick={() => {
+                                  if (window.confirm(`Confirmar que ${v.cliente} pagou ${formatBRL(faltaReceber(v))}? A venda fica como Paga.`)) onReceber(v);
+                                }}
+                              >
+                                Recebi
+                              </button>
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                      {fone ? (
+                        <a href={`https://wa.me/${fone}?text=${encodeURIComponent(texto)}`} target="_blank" rel="noreferrer" style={btn(true)}>Cobrar no WhatsApp</a>
+                      ) : (
+                        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>Sem telefone na ficha do cliente para cobrar pelo WhatsApp.</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.45 }}>
+            Conta desde a data da venda. Vermelho = mais de 15 dias. "Já entregue" quer dizer que o cliente já está com o tênis e ainda não pagou.
+          </div>
+        </LedgerCard>
+      </div>
+    </div>
   );
 }
 
@@ -3161,6 +3314,7 @@ function PrimeStepApp() {
   const [pagamentosEntregadorOk, setPagamentosEntregadorOk] = useState(true);
   const [pagamentosTerceirizado, setPagamentosTerceirizado] = useState([]);
   const [mostrarUsuarios, setMostrarUsuarios] = useState(false);
+  const [mostrarAReceber, setMostrarAReceber] = useState(false);
   const [ehAdmin, setEhAdmin] = useState(false);
   useEffect(() => {
     supabase.functions.invoke("usuarios", { body: { acao: "eu" } }).then(({ data }) => setEhAdmin(data?.admin === true)).catch(() => {});
@@ -3824,7 +3978,7 @@ function PrimeStepApp() {
               <StatCard label="Receitas do mês" value={formatBRL(totalReceitas)} icon={TrendingUp} tone="up" />
               <StatCard label="Despesas do mês (com custos das vendas)" value={formatBRL(totalDespesas)} icon={TrendingDown} tone="down" />
               <StatCard label="Lucro real do mês (saldo)" value={formatBRL(saldo)} icon={Wallet} tone={saldo >= 0 ? "up" : "down"} />
-              <StatCard label="A receber (vendas deste mês)" value={formatBRL(pendentes)} icon={Clock} />
+              <StatCard label="A receber (vendas deste mês)" value={formatBRL(pendentes)} icon={Clock} onClick={() => setMostrarAReceber(true)} dica="ver quem não pagou →" />
               <StatCard label="Pares feitos no mês" value={String(paresMes)} icon={Check} />
               <StatCard label="Lucro das vendas (antes das outras despesas)" value={formatBRL(lucroVendasMes)} icon={TrendingUp} tone={lucroVendasMes >= 0 ? "up" : "down"} />
               <StatCard label="Custos das vendas" value={formatBRL(custosVendasMes)} icon={TrendingDown} tone="down" />
@@ -4735,6 +4889,19 @@ function PrimeStepApp() {
         />
       )}
       {mostrarUsuarios && <UsuariosModal admin={ehAdmin} onClose={() => setMostrarUsuarios(false)} />}
+      {mostrarAReceber && (
+        <AReceberModal
+          vendas={vendas}
+          clientes={clientes}
+          pedidos={pedidos}
+          onReceber={(v) => {
+            const paga = { ...v, status: "pago", entrada: null };
+            persistVendas(vendas.map((x) => (x.id === v.id ? paga : x)), { type: "upsert", item: paga });
+          }}
+          onAbrirVenda={(v) => { setMostrarAReceber(false); setModal({ type: "venda", initial: v }); }}
+          onClose={() => setMostrarAReceber(false)}
+        />
+      )}
       {modal && modal.type === "cliente" && (
         <ClienteModal
           initial={modal.initial}
