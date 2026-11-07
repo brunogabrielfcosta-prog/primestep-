@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
-import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, Wallet, Check, Clock, Download, Upload, Calendar } from "lucide-react";
+import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, Wallet, Check, Clock, Download, Upload, Calendar, ShoppingBag } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 import ControlePessoal from "./ControlePessoal.jsx";
 
@@ -3980,6 +3980,7 @@ function PrimeStepApp() {
               <StatCard label="Lucro real do mês (saldo)" value={formatBRL(saldo)} icon={Wallet} tone={saldo >= 0 ? "up" : "down"} />
               <StatCard label="A receber (vendas deste mês)" value={formatBRL(pendentes)} icon={Clock} onClick={() => setMostrarAReceber(true)} dica="ver quem não pagou →" />
               <StatCard label="Pares feitos no mês" value={String(paresMes)} icon={Check} />
+              <StatCard label="Vendas feitas no mês" value={String(vendasMes.length)} icon={ShoppingBag} />
               <StatCard label="Lucro das vendas (antes das outras despesas)" value={formatBRL(lucroVendasMes)} icon={TrendingUp} tone={lucroVendasMes >= 0 ? "up" : "down"} />
               <StatCard label="Custos das vendas" value={formatBRL(custosVendasMes)} icon={TrendingDown} tone="down" />
             </div>
