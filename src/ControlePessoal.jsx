@@ -34,6 +34,9 @@ function monthLabel(key) {
   return `${MESES[parseInt(m, 10) - 1]}/${y}`;
 }
 
+// Dívida com fornecedor criada automaticamente a partir de uma venda de aparelho.
+const idDividaDaVenda = (vendaId) => `v-${vendaId}`;
+
 // ---------- Banco de dados ----------
 function rowToDivida(row) {
   return { id: row.id, fornecedor: row.fornecedor, valor: Number(row.valor), vendedor: row.vendedor || "", data: row.data, observacao: row.observacao || "" };
@@ -256,8 +259,9 @@ function FiadoModal({ initial, onSave, onClose }) {
 }
 
 // ---------- Modal: nova/editar venda de aparelho ----------
-function VendaModal({ initial, onSave, onClose }) {
+function VendaModal({ initial, fornecedorInicial, fornecedores, onSave, onClose }) {
   const [cliente, setCliente] = useState(initial?.cliente || "");
+  const [fornecedor, setFornecedor] = useState(fornecedorInicial || "");
   const [telefone, setTelefone] = useState(initial?.telefone || "");
   const [aparelho, setAparelho] = useState(initial?.aparelho || "");
   const [imei, setImei] = useState(initial?.imei || "");
@@ -276,9 +280,14 @@ function VendaModal({ initial, onSave, onClose }) {
     const v = parseFloat(String(valorVenda).replace(",", "."));
     if (!v || v <= 0) { setError("Informe um valor de venda válido."); return; }
     if (isNaN(c) || c < 0) { setError("Informe um valor de custo válido."); return; }
+    if (fornecedor.trim() && !(c > 0)) { setError("Informe o custo do aparelho para lançar a dívida com o fornecedor."); return; }
+    // Usa a grafia já cadastrada do fornecedor (ex.: "pistori" vira "Pistori"), pra não abrir outro card.
+    const digitado = fornecedor.trim();
+    const existente = fornecedores.find((f) => f.toLowerCase() === digitado.toLowerCase());
     onSave({
       id: initial?.id || uid(), cliente: cliente.trim(), telefone: telefone.trim(), aparelho: aparelho.trim(),
       imei: imei.trim(), custo: c, valorVenda: v, data, observacao: observacao.trim(),
+      fornecedor: existente || digitado,
     });
   }
 
@@ -303,6 +312,12 @@ function VendaModal({ initial, onSave, onClose }) {
             <Field label="IMEI">
               <input type="text" inputMode="numeric" value={imei} onChange={(e) => setImei(e.target.value)} placeholder="Ex: 356789104561234" style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }} />
             </Field>
+            <Field label="Fornecedor (de quem pegou o aparelho)">
+              <input list="lista-fornecedores-venda" type="text" value={fornecedor} onChange={(e) => setFornecedor(e.target.value)} placeholder="Escolha ou digite — deixe vazio se o aparelho já é seu" style={inputStyle} />
+              <datalist id="lista-fornecedores-venda">
+                {fornecedores.map((f) => <option key={f} value={f} />)}
+              </datalist>
+            </Field>
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 1 }}>
                 <Field label="Custo (R$)">
@@ -321,6 +336,11 @@ function VendaModal({ initial, onSave, onClose }) {
             <Field label="Observação (opcional)">
               <input type="text" value={observacao} onChange={(e) => setObservacao(e.target.value)} placeholder="Ex: garantia de 3 meses" style={inputStyle} />
             </Field>
+            {fornecedor.trim() && (
+              <div style={{ fontSize: 12, color: "var(--muted)", background: "var(--bg)", borderRadius: 5, padding: "8px 10px" }}>
+                O custo vai como dívida em aberto com <strong style={{ color: "var(--ink)" }}>{fornecedor.trim()}</strong> na aba Fornecedores. Quando pagar, é só tocar em "Registrar pagamento" lá.
+              </div>
+            )}
             {error && <div style={{ color: "var(--rust)", fontSize: 12.5 }}>{error}</div>}
             <button type="submit" style={{ marginTop: 4, padding: "11px 14px", borderRadius: 5, border: "none", cursor: "pointer", background: "var(--ink)", color: "var(--paper)", fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 13.5 }}>
               Salvar venda
@@ -609,19 +629,47 @@ function ControlePessoalApp({ onSair }) {
     deleteLinha("pessoal_fiado_pagamentos", id);
   }
 
-  function salvarVenda(item) {
+  function salvarVenda({ fornecedor, ...item }) {
     const exists = vendas.some((v) => v.id === item.id);
     setVendas((prev) => (exists ? prev.map((v) => (v.id === item.id ? item : v)) : [item, ...prev]));
     upsertLinha("pessoal_vendas", {
       id: item.id, cliente: item.cliente, telefone: item.telefone, aparelho: item.aparelho,
       imei: item.imei, custo: item.custo, valor_venda: item.valorVenda, data: item.data, observacao: item.observacao,
     });
+
+    // Lança (ou atualiza) automaticamente a dívida com o fornecedor do aparelho.
+    const dividaId = idDividaDaVenda(item.id);
+    if (fornecedor) {
+      const divida = {
+        id: dividaId, fornecedor, valor: item.custo, vendedor: "", data: item.data,
+        observacao: `${item.aparelho} · IMEI ${item.imei} · venda p/ ${item.cliente}`,
+      };
+      setDividas((prev) => (prev.some((d) => d.id === dividaId) ? prev.map((d) => (d.id === dividaId ? divida : d)) : [divida, ...prev]));
+      upsertLinha("pessoal_dividas", divida);
+    } else if (dividas.some((d) => d.id === dividaId)) {
+      setDividas((prev) => prev.filter((d) => d.id !== dividaId));
+      deleteLinha("pessoal_dividas", dividaId);
+    }
     setModal(null);
   }
   function excluirVenda(id) {
     setVendas((prev) => prev.filter((v) => v.id !== id));
     deleteLinha("pessoal_vendas", id);
+    const dividaId = idDividaDaVenda(id);
+    if (dividas.some((d) => d.id === dividaId)) {
+      setDividas((prev) => prev.filter((d) => d.id !== dividaId));
+      deleteLinha("pessoal_dividas", dividaId);
+    }
   }
+
+  const nomesFornecedores = useMemo(() => {
+    const nomes = [];
+    [...dividas.map((d) => d.fornecedor), ...pagamentosF.map((p) => p.fornecedor), ...FORNECEDORES_SUGERIDOS].forEach((n) => {
+      if (n && !nomes.some((x) => x.toLowerCase() === n.toLowerCase())) nomes.push(n);
+    });
+    return nomes;
+  }, [dividas, pagamentosF]);
+  const fornecedorDaVenda = (vendaId) => dividas.find((d) => d.id === idDividaDaVenda(vendaId))?.fornecedor || "";
 
   // ---- Agrupamentos ----
   const resumoFornecedores = useMemo(() => {
@@ -937,6 +985,7 @@ function ControlePessoalApp({ onSair }) {
                                   <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>{v.aparelho}</div>
                                   <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "var(--muted)", marginTop: 3 }}>IMEI: {v.imei}</div>
                                   <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{formatDateBR(v.data)}</div>
+                                  {fornecedorDaVenda(v.id) && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>Fornecedor: <strong style={{ color: "var(--ink)" }}>{fornecedorDaVenda(v.id)}</strong></div>}
                                   {v.observacao && <div style={{ fontSize: 11.5, color: "var(--ink)", marginTop: 3, fontStyle: "italic" }}>{v.observacao}</div>}
                                 </div>
                                 <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
@@ -998,7 +1047,15 @@ function ControlePessoalApp({ onSair }) {
 
       {modal && modal.type === "divida" && <DividaModal initial={modal.initial} onSave={salvarDivida} onClose={() => setModal(null)} />}
       {modal && modal.type === "fiado" && <FiadoModal initial={modal.initial} onSave={salvarFiado} onClose={() => setModal(null)} />}
-      {modal && modal.type === "venda" && <VendaModal initial={modal.initial} onSave={salvarVenda} onClose={() => setModal(null)} />}
+      {modal && modal.type === "venda" && (
+        <VendaModal
+          initial={modal.initial}
+          fornecedorInicial={modal.initial ? fornecedorDaVenda(modal.initial.id) : ""}
+          fornecedores={nomesFornecedores}
+          onSave={salvarVenda}
+          onClose={() => setModal(null)}
+        />
+      )}
       {modal && modal.type === "pagamentoF" && (
         <PagamentoModal nome={modal.nome} saldoRestante={modal.saldo} onSave={(p) => registrarPagamentoFornecedor(modal.nome, p)} onClose={() => setModal(null)} />
       )}
