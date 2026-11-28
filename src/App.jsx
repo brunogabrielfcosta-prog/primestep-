@@ -5150,6 +5150,6 @@ export default function App() {
 
   if (sessao === undefined) return <TelaCarregando />;
   if (!sessao) return <TelaLogin />;
-  if (rota === "#pessoal") return <ControlePessoal />;
+  if (rota === "#pessoal" || rota === "#theedit") return <ControlePessoal />;
   return <PrimeStepApp />;
 }
